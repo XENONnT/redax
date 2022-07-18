@@ -37,6 +37,7 @@ V1724::V1724(std::shared_ptr<MongoLog>& log, std::shared_ptr<Options>& opts, int
   fPreTrigChRegister = 0x1038;
   fError = false;
   fBufferSize = 0x800000; // 8 MB total memory
+  fSumWFthreshold = 75; // some reasonable default
 
   fSampleWidth = 10;
   fClockCycle = 10;
