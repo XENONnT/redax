@@ -52,7 +52,7 @@ class StraxFormatter{
   */
 
 public:
-  StraxFormatter(std::shared_ptr<Options>&, std::shared_ptr<MongoLog>&);
+  StraxFormatter(std::shared_ptr<Options>&, std::shared_ptr<MongoLog>&, const std::map<int, std::vector<std::shared_ptr<V1724>>>&);
   ~StraxFormatter();
 
   void Close(std::map<int,int>& ret);
