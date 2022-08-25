@@ -278,11 +278,14 @@ void StraxFormatter::AddFragmentToBuffer(std::string fragment, uint32_t ts, int 
 
   fOutputBufferSize += fFullFragmentSize;
 
-  if(!overlap){
+  auto chunks = {&fChunks, &fOverlaps};
+  (*chunks[overlap])[chunk_id].emplace_back(std::move(fragment));
+
+/*  if(!overlap){
     fChunks[chunk_id].emplace_back(std::move(fragment));
   } else {
     fOverlaps[chunk_id].emplace_back(std::move(fragment));
-  }
+  }*/
 }
 
 int StraxFormatter::ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>& in, int bytes) {
