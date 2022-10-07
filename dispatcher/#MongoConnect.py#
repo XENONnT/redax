@@ -46,7 +46,7 @@ class MongoConnect(object):
     D. Coderre, 12. Mar. 2019
     D. Masson, 2019-2021
     S. di Pede, 2020-2021
-    V. D'Andrea, May 2022
+    V. D'Andrea, May o2022
 
     Brief: This code handles the mongo connectivity for both the DAQ 
     databases (the ones used for system-wide communication) and the 
