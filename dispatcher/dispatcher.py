@@ -93,16 +93,17 @@ def main(config, control_mc, logger, daq_config, vme_config, SlackBot, runs_mc, 
         # Get the Logical Detector configuration
         current_config = mc.get_logical_detector()
         # Get most recent check-in from all connected hosts
-        if (latest_status := mc.get_update(current_config)) is None:
+        if mc.get_update(current_config) is None:
             continue
-
+        latest_status = mc.latest_status
+        latest_physical_status = mc.physical_agg_status
         # Print an update
         for log_det in latest_status.keys():
-            for detector in latest_status[log_det]['detectors'].keys():
-                state = 'ACTIVE' if goal_state[detector]['active'] == 'true' else 'INACTIVE'
-                msg = (f'Logical detector {log_det}: '
-                       f'The {detector} should be {state} and is '
-                       f'{latest_status[detector]["status"].name}')
+            for det in latest_status[log_det]['detectors'].keys():
+                state = 'ACTIVE' if goal_state[det]['active'] == 'true' else 'INACTIVE'
+                msg = (f'{log_det} {det} should be {state}: '
+                       f'logical detector is {latest_status[log_det]["status"]}, '
+                       f'physical detector is {latest_physical_status[det]["status"]}')
                 if latest_status[log_det]['number'] != -1:
                     msg += f' ({latest_status[log_det]["number"]})'
                 logger.debug(msg)

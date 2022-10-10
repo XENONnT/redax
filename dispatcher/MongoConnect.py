@@ -214,8 +214,8 @@ class MongoConnect(object):
         self.latest_status = dc
 
         # Now compute aggregate status
-        return self.latest_status if self.aggregate_status() is None else None
-
+        return self.aggregate_status()
+    
     def clear_error_timeouts(self):
         self.error_sent = {}
 
@@ -237,17 +237,16 @@ class MongoConnect(object):
            apply to both
         """
         now_time = time.time()
-        ret = None
         aggstat = {
-                k:{ 'status': -1,
-                    'detector': k,
-                    'rate': 0,
-                    'time': now(),
-                    'buff': 0,
-                    'mode': None,
-                    'pll_unlocks': 0,
-                    'number': -1}
-                for k in self.dc}
+            k:{ 'status': -1,
+                'detector': k,
+                'rate': 0,
+                'time': now(),
+                'buff': 0,
+                'mode': None,
+                'pll_unlocks': 0,
+                'number': -1}
+            for k in self.dc}
         phys_stat = {k: [] for k in self.dc}
         for detector in self.latest_status.keys():
             # detector = logical
@@ -317,18 +316,17 @@ class MongoConnect(object):
         except Exception as e:
             self.logger.error(f'DB snafu? Couldn\'t update aggregate status. '
                             f'{type(e)}, {e}')
-
+            return None
+        self.physical_status = phys_stat
+        
         # Aggregate status for the physical detectors
         phys_agg_status = {k: {} for k in self.dc}
         for detector in phys_agg_status.keys():
             status = self.combine_statuses(phys_stat[detector])
             phys_agg_status[detector]['status'] = status
-        
-        self.physical_status = phys_stat
         self.physical_agg_status = phys_agg_status
-
-        return ret
-
+        return True
+    
     def combine_statuses(self, status_list):
         # First, the "or" statuses
         for stat in ['ARMING','ERROR','TIMEOUT','UNKNOWN']:
