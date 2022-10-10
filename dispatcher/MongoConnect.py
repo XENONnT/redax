@@ -214,7 +214,7 @@ class MongoConnect(object):
         self.latest_status = dc
 
         # Now compute aggregate status
-        return self.aggregate_status()
+        return self.latest_status if self.aggregate_status() else None
     
     def clear_error_timeouts(self):
         self.error_sent = {}
@@ -318,13 +318,12 @@ class MongoConnect(object):
                             f'{type(e)}, {e}')
             return None
         self.physical_status = phys_stat
-        
+
         # Aggregate status for the physical detectors
-        phys_agg_status = {k: {} for k in self.dc}
-        for detector in phys_agg_status.keys():
-            status = self.combine_statuses(phys_stat[detector])
-            phys_agg_status[detector]['status'] = status
-        self.physical_agg_status = phys_agg_status
+        for log_det in self.latest_status.keys():
+            for det in self.latest_status[log_det]['detectors'].keys():
+                status = self.combine_statuses(phys_stat[det])
+                self.latest_status[log_det]['detectors'][det]['status'] = status
         return True
     
     def combine_statuses(self, status_list):
