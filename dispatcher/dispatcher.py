@@ -110,7 +110,6 @@ def main(config, control_mc, logger, daq_config, vme_config, SlackBot, runs_mc, 
                f"tpc-nv: {mc.is_linked('tpc', 'neutron_veto')}, "
                f"mv-nv: {mc.is_linked('muon_veto', 'neutron_veto')}")
         logger.debug(msg)
-
         # Decision time. Are we actually in our goal state? If not what should we do?
         dc.solve_problem(latest_status, goal_state)
 

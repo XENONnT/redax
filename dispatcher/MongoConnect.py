@@ -46,7 +46,7 @@ class MongoConnect(object):
     D. Coderre, 12. Mar. 2019
     D. Masson, 2019-2021
     S. di Pede, 2020-2021
-    V. D'Andrea, May 2022
+    V. D'Andrea, Oct 2022
 
     Brief: This code handles the mongo connectivity for both the DAQ 
     databases (the ones used for system-wide communication) and the 
@@ -305,7 +305,7 @@ class MongoConnect(object):
             else:
                 status_list = list(statuses.values())
 
-            # Now we aggregate the statuses
+            # Now we aggregate the statuses for the logical detectors
             status = self.combine_statuses(status_list)
 
             self.latest_status[detector]['status'] = status
@@ -318,7 +318,15 @@ class MongoConnect(object):
             self.logger.error(f'DB snafu? Couldn\'t update aggregate status. '
                             f'{type(e)}, {e}')
 
+        # Aggregate status for the physical detectors
+        phys_agg_status = {k: {} for k in self.dc}
+        for detector in phys_agg_status.keys():
+            status = self.combine_statuses(phys_stat[detector])
+            phys_agg_status[detector]['status'] = status
+        
         self.physical_status = phys_stat
+        self.physical_agg_status = phys_agg_status
+
         return ret
 
     def combine_statuses(self, status_list):
@@ -464,7 +472,7 @@ class MongoConnect(object):
             ret = {'tpc_nv': {'controller': tpc['controller'][:] + nv['controller'][:],
                               'readers': tpc['readers'][:] + nv['readers'][:],
                               'detectors': ['tpc','neutron_veto']},
-                   'mv' = {'controller': mv['controller'][:],
+                   'mv': {'controller': mv['controller'][:],
                            'readers': mv['readers'][:],
                            'detectors': ['muon_veto']}}
         elif is_mv_nv and not is_tpc_mv and not is_tpc_nv:
@@ -472,7 +480,7 @@ class MongoConnect(object):
             ret = {'tpc': {'controller': tpc['controller'][:],
                               'readers': tpc['readers'][:],
                               'detectors': ['tpc']},
-                   'mv_nv' = {'controller': mv['controller'][:] + nv['controller'][:],
+                   'mv_nv': {'controller': mv['controller'][:] + nv['controller'][:],
                               'readers': mv['readers'][:] + nv['readers'][:],
                               'detectors': ['muon_veto','neutron_veto']}}
         else:
@@ -480,10 +488,10 @@ class MongoConnect(object):
             ret = {'tpc': {'controller': tpc['controller'][:],
                            'readers': tpc['readers'][:],
                            'detectors': ['tpc']},
-                   'mv' = {'controller': mv['controller'][:],
+                   'mv': {'controller': mv['controller'][:],
                            'readers': mv['readers'][:],
                            'detectors': ['muon_veto']},
-                   'nv' = {'controller': nv['controller'][:],
+                   'nv': {'controller': nv['controller'][:],
                            'readers': nv['readers'][:],
                            'detectors': ['neutron_veto']}}
         
