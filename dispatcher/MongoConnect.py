@@ -320,10 +320,10 @@ class MongoConnect(object):
         self.physical_status = phys_stat
 
         # Aggregate status for the physical detectors
-        for log_det in self.latest_status.keys():
-            for det in self.latest_status[log_det]['detectors'].keys():
+        for logical in self.latest_status.keys():
+            for det in self.latest_status[logical]['detectors'].keys():
                 status = self.combine_statuses(phys_stat[det])
-                self.latest_status[log_det]['detectors'][det]['status'] = status
+                self.latest_status[logical]['detectors'][det]['status'] = status
         return True
     
     def combine_statuses(self, status_list):
@@ -562,19 +562,20 @@ class MongoConnect(object):
             return 0
         return list(cursor)[0]['number']+1
 
-    def set_stop_time(self, number, detectors, force):
+    def set_stop_time(self, number, logical, force):
         """
         Sets the 'end' field of the run doc to the time when the STOP command was ack'd
         """
-        self.logger.info(f"Updating run {number} with end time ({detectors})")
+        self.logger.info(f"Updating run {number} with end time ({logical})")
         if number == -1:
             return
         try:
             time.sleep(0.5) # this number depends on the CC command polling time
-            if (endtime := self.get_ack_time(detectors, 'stop') ) is None:
+            if (endtime := self.get_ack_time(logical, 'stop') ) is None:
                 self.logger.debug(f'No end time found for run {number}')
-                endtime = now() -datetime.timedelta(seconds=1)
-            query = {"number": int(number), "end": None, 'detectors': detectors}
+                endtime = now() - datetime.timedelta(seconds=1)
+            det = list(latest_status[logical]['detectors'].keys())[0]
+            query = {"number": int(number), "end": None, 'detectors': det}
             updates = {"$set": {"end": endtime}}
             if force:
                 updates["$push"] = {"tags": {"name": "_messy", "user": "daq",
@@ -590,10 +591,11 @@ class MongoConnect(object):
                     ]):
                     rate[doc['_id']] = {'avg': doc['avg'], 'max': doc['max']}
                 channels = set()
-                if 'tpc' in detectors:
+
+                if 'tpc' in latest_status[logical]['detectors'].keys():
                     # figure out which channels weren't running
-                    readers = list(self.latest_status[detectors]['readers'].keys())
-                    for doc in self.collections['node_status'].find({'host': {'$in': readers}, 'number': int(number)}):
+                    readers = list(self.latest_status[logical]['readers'].keys())
+                    for doc in self.collections['node_status'].find({'host': {'$in': readers},'number': int(number)}):
                         channels |= set(map(int, doc['channels'].keys()))
                 updates = {'rate': rate}
                 if len(channels):
@@ -608,12 +610,12 @@ class MongoConnect(object):
             self.logger.error(f"Database having a moment, hope this doesn't crash. {type(e)}, {e}")
         return
 
-    def get_ack_time(self, detector, command, recurse=True):
+    def get_ack_time(self, logical, command, recurse=True):
         '''
         Finds the time when specified detector's crate controller ack'd the specified command
         '''
         # the first cc is the "master", so its ack time is what counts
-        cc = list(self.latest_status[detector]['controller'].keys())[0]
+        cc = list(self.latest_status[logical]['controller'].keys())[0]
         query = {'host': cc, f'acknowledged.{cc}': {'$ne': 0}, 'command': command}
         sort = [('_id', -1)]
         doc = self.collections['outgoing_commands'].find_one(query, sort=sort)
@@ -621,12 +623,12 @@ class MongoConnect(object):
         if dt > 30: # TODO make this a config value
             if recurse:
                 # No way we found the correct command here, maybe we're too soon
-                self.logger.debug(f'Most recent ack for {detector}-{command} is {dt:.1f}?')
+                self.logger.debug(f'Most recent ack for {logical}-{command} is {dt:.1f}?')
                 time.sleep(2) # if in doubt
-                return self.get_ack_time(detector, command, False)
+                return self.get_ack_time(logical, command, False)
             else:
                 # Welp
-                self.logger.debug(f'No recent ack time for {detector}-{command}')
+                self.logger.debug(f'No recent ack time for {logical}-{command}')
                 return None
         return doc['acknowledged'][cc]
 
@@ -782,35 +784,35 @@ class MongoConnect(object):
             return self.run_start_cache[str(number)]
         return None
 
-    def insert_run_doc(self, detector):
+    def insert_run_doc(self, logical):
 
         if (number := self.get_next_run_number()) == NO_NEW_RUN:
             self.logger.error("DB having a moment")
             return -1
         # the rundoc gets the physical detectors, not the logical
         detectors = self.latest_status[detector]['detectors']
-
+        det = list(detectors.keys())[0]:
         run_doc = {
             "number": number,
             'detectors': detectors,
-            'user': self.goal_state[detector]['user'],
-            'mode': self.goal_state[detector]['mode'],
+            'user': self.goal_state[det]['user'],
+            'mode': self.goal_state[det]['mode'],
             'bootstrax': {'state': None},
             'end': None
         }
 
         # If there's a source add the source. Also add the complete ini file.
-        cfg = self.get_run_mode(self.goal_state[detector]['mode'])
+        cfg = self.get_run_mode(self.goal_state[det]['mode'])
         if cfg is not None and 'source' in cfg.keys():
             run_doc['source'] = str(cfg['source'])
         run_doc['daq_config'] = cfg
 
         # If the user started the run with a comment add that too
-        if "comment" in self.goal_state[detector] and self.goal_state[detector]['comment'] != "":
+        if "comment" in self.goal_state[det] and self.goal_state[det]['comment'] != "":
             run_doc['comments'] = [{
-                "user": self.goal_state[detector]['user'],
+                "user": self.goal_state[det]['user'],
                 "date": now(),
-                "comment": self.goal_state[detector]['comment']
+                "comment": self.goal_state[det]['comment']
             }]
 
         # Make a data entry so bootstrax can find the thing
@@ -824,7 +826,7 @@ class MongoConnect(object):
         # The cc needs some time to get started
         time.sleep(self.cc_start_wait)
         try:
-            start_time = self.get_ack_time(detector, 'start')
+            start_time = self.get_ack_time(logical, 'start')
         except Exception as e:
             self.logger.error('Couldn\'t find start time ack')
             start_time = None

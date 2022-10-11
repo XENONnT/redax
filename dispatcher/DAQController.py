@@ -258,7 +258,7 @@ class DAQController():
             return 1
         return 0
 
-    def check_timeouts(self, detector, command=None):
+    def check_timeouts(self, logical, command=None):
         """ 
         This one is invoked if we think we need to change states. Either a stop command needs
         to be sent, or we've detected an anomaly and want to decide what to do. 
@@ -269,13 +269,13 @@ class DAQController():
         """
 
         time_now = now()
-
-        #First check how often we have been timing out, if it happened to often
-        # something bad happened and we start from scratch again
-        if self.missed_arm_cycles[detector]>self.max_arm_cycles and detector=='tpc':
+        det = list(self.latest_status[logical]['detectors'].keys())[0]
+        #How often we have been timing out?
+        if self.missed_arm_cycles[det] > self.max_arm_cycles and det == 'tpc':
             if (dt := (now()-self.last_nuke).total_seconds()) > self.hv_nuclear_timeout:
                 self.logger.critical('There\'s only one way to be sure')
-                self.control_detector(detector='tpc', command='stop', force=True)
+                #self.control_detector(detector='tpc', command='stop', force=True)
+                self.control_detector(logical,'stop', force=True)
                 if self.hypervisor.tactical_nuclear_option(self.mongo.is_linked_mode()):
                     self.last_nuke = now()
             else:
@@ -283,24 +283,21 @@ class DAQController():
                 self.logger.debug(f'Nuclear timeout at {int(dt)}/{self.hv_nuclear_timeout}')
 
         if command is None: # not specified, we figure out it here
-            command_times = [(cmd,doc[detector]) for cmd,doc in self.last_command.items()]
+            command_times = [(cmd,doc[det]) for cmd,doc in self.last_command.items()]
             command = sorted(command_times, key=lambda x : x[1])[-1][0]
-            self.logger.debug(f'Most recent command for {detector} is {command}')
+            self.logger.debug(f'Most recent command for {logical} is {command}')
         else:
-            self.logger.debug(f'Checking {command} timeout for {detector}')
+            self.logger.debug(f'Checking {command} timeout for {logical}')
 
-        dt = (time_now - self.last_command[command][detector]).total_seconds()
+        dt = (time_now - self.last_command[command][det]).total_seconds()
 
         local_timeouts = dict(self.timeouts.items())
-        local_timeouts['stop'] = self.timeouts['stop']*(self.error_stop_count[detector]+1)
+        local_timeouts['stop'] = self.timeouts['stop']*(self.error_stop_count[det]+1)
 
-        if dt < local_timeouts[command]:
-            self.logger.debug('%i is within the %i second timeout for a %s command' %
-                    (dt, local_timeouts[command], command))
-        else:
+        if dt > local_timeouts[command]:
             # timing out, maybe send stop?
             if command == 'stop':
-                if self.error_stop_count[detector] >= self.stop_retries:
+                if self.error_stop_count[det] >= self.stop_retries:
                     # failed too many times, issue error
                     self.mongo.log_error(
                                         ("Dispatcher control loop detects a timeout that STOP " +
@@ -308,34 +305,37 @@ class DAQController():
                                         'ERROR',
                                         "STOP_TIMEOUT")
                     # also invoke the nuclear option
-                    if detector == 'tpc':
+                    if det == 'tpc':
                         if (dt := (now()-self.last_nuke).total_seconds()) > self.hv_nuclear_timeout:
-                            self.control_detector(detector='tpc', command='stop', force=True)
+                            self.control_detector(logical,'stop', force=True)
                             self.logger.critical('There\'s only one way to be sure')
                             if self.hypervisor.tactical_nuclear_option(self.mongo.is_linked_mode()):
                                 self.last_nuke = now()
                         else:
-                            self.control_detector(detector=detector, command='stop')
+                            self.control_detector(logical, 'stop')
                             self.logger.debug(f'Nuclear timeout at {int(dt)}/{self.hv_nuclear_timeout}')
-                    self.error_stop_count[detector] = 0
+                    self.error_stop_count[det] = 0
                 else:
-                    self.control_detector(detector=detector, command='stop')
-                    self.logger.debug(f'Working on a stop counter for {detector}')
-                    self.error_stop_count[detector] += 1
+                    self.control_detector(logical, 'stop')
+                    self.logger.debug(f'Working on a stop counter for {logical}')
+                    self.error_stop_count[det] += 1
             else:
                 self.mongo.log_error(
                         ('%s took more than %i seconds to %s, indicating a possible timeout or error' %
-                            (detector, self.timeouts[command], command)),
+                            (logical, self.timeouts[command], command)),
                         'ERROR',
                         '%s_TIMEOUT' % command.upper())
                 #Keep track of how often the arming sequence times out
-                if self.control_detector(detector=detector, command='stop') == 0:
+                if self.control_detector(logical, 'stop') == 0:
                     # only increment the counter if we actually issued a STOP
-                    self.missed_arm_cycles[detector] += 1
-                    self.logger.info(f'{detector} missed {self.missed_arm_cycles[detector]} arm cycles')
+                    self.missed_arm_cycles[det] += 1
+                    self.logger.info(f'{logical} missed {self.missed_arm_cycles[det]} arm cycles')
                 else:
-                    self.logger.debug(f'{detector} didn\'t actually get a command, no arm cycler increment')
-
+                    self.logger.debug(f'{logical} didn\'t actually get a command, no arm cycler increment')
+        else:
+            self.logger.debug('%i is within the %i second timeout for a %s command' %
+                              (dt, local_timeouts[command], command))
+            
         return
 
     def throw_error(self):
