@@ -37,9 +37,9 @@ class DAQController():
             self.last_command[k] = {}
             for d in detectors:
                 self.last_command[k][d] = now()
-        self.error_stop_count = {d : 0 for d in detectors}
+        self.error_stop_count = {d: 0 for d in detectors}
         self.max_arm_cycles = int(config['MaxArmCycles'])
-        self.missed_arm_cycles = {k:0 for k in detectors}
+        self.missed_arm_cycles = {k: 0 for k in detectors}
 
         # Timeout properties come from config
         self.timeouts = {
@@ -107,11 +107,11 @@ class DAQController():
                     # Check before if the status is UNKNOWN and it is maybe timing out
                     if latest_status[logical]['status'] == DAQ_STATUS.UNKNOWN:
                         self.logger.info(f"The status of {logical} is unknown, check timeouts")
-                        self.check_timeouts(detector=det) # TODO: CHECK LOGICAL OR PHYSICAL
+                        self.check_timeouts(logical)
                     # Otherwise stop the detector
                     else:
                         self.logger.info(f"Sending stop command to {logical}")
-                        self.stop_detector_gently(detector=det) # TODO: CHECK LOGICAL OR PHYSICAL
+                        self.stop_detector_gently(logical)
                 # Deal separately with the TIMEOUT and ERROR statuses, by stopping the detector if needed
                 elif latest_status[logical]['status'] == DAQ_STATUS.TIMEOUT:
                     self.logger.info(f"The {logical} is in timeout, check timeouts")
@@ -141,12 +141,12 @@ class DAQController():
                 elif latest_status[logical]['status'] == DAQ_STATUS.ARMING:
                     self.logger.info(f"The {logical} is arming, check timeouts")
                     self.logger.debug(f"Checking the {logical} timeouts")
-                    self.check_timeouts(detector=det) # TODO: CHECK LOGICAL OR PHYSICAL
+                    self.check_timeouts(logical)
                 # UNKNOWN, check if it is timing out
                 elif latest_status[logical]['status'] == DAQ_STATUS.UNKNOWN:
                     self.logger.info(f"The status of {logical} is unknown, check timeouts")
                     self.logger.debug(f"Checking the {logical} timeouts")
-                    self.check_timeouts(detector=det) # TODO: CHECK LOGICAL OR PHYSICAL
+                    self.check_timeouts(logical)
                 # Maybe the detector is IDLE, we should arm a run
                 elif latest_status[logical]['status'] == DAQ_STATUS.IDLE:
                     self.logger.info(f"The {logical} is idle, sending arm command")
@@ -174,7 +174,7 @@ class DAQController():
         det = list(latest_status[logical]['detectors'].keys())[0]
         self.control_detector(logical, 'stop', force = self.can_force_stop[det])
         self.can_force_stop[det] = False
-        self.check_timeouts(detector)  # TODO: CHECK LOGICAL OR PHYSICAL
+        self.check_timeouts(logical)
         return
 
     def stop_detector_gently(self, logical):
@@ -229,8 +229,7 @@ class DAQController():
                 hosts = (readers, cc)
                 delay = self.start_cmd_delay
                 #Reset arming timeout counter
-                for dd in self.latest_status[logical]['detectors'].keys():
-                    self.missed_arm_cycles[dd] = 0
+                self.missed_arm_cycles[det] = 0
             else: # stop
                 readers, cc = self.mongo.get_hosts_for_mode(ls[logical]['mode'], detector)
                 hosts = (cc, readers)
@@ -274,7 +273,6 @@ class DAQController():
         if self.missed_arm_cycles[det] > self.max_arm_cycles and det == 'tpc':
             if (dt := (now()-self.last_nuke).total_seconds()) > self.hv_nuclear_timeout:
                 self.logger.critical('There\'s only one way to be sure')
-                #self.control_detector(detector='tpc', command='stop', force=True)
                 self.control_detector(logical,'stop', force=True)
                 if self.hypervisor.tactical_nuclear_option(self.mongo.is_linked_mode()):
                     self.last_nuke = now()

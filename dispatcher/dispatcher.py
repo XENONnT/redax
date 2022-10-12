@@ -96,14 +96,14 @@ def main(config, control_mc, logger, daq_config, vme_config, SlackBot, runs_mc, 
         if (latest_status := mc.get_update(current_config)) is None:
             continue
         # Print an update
-        for log_det in latest_status.keys():
-            for det in latest_status[log_det]['detectors'].keys():
+        for logical in latest_status.keys():
+            for det in latest_status[logical]['detectors'].keys():
                 state = 'ACTIVE' if goal_state[det]['active'] == 'true' else 'INACTIVE'
-                msg = (f'{log_det} {det} should be {state}: '
-                       f'logical detector is {latest_status[log_det]["status"]}, '
-                       f'physical detector is {latest_status[log_det]["detectors"][det]["status"]}')
-                if latest_status[log_det]['number'] != -1:
-                    msg += f' ({latest_status[log_det]["number"]})'
+                msg = (f'{logical} {det} should be {state}: '
+                       f'logical detector is {latest_status[logical]["status"]}, '
+                       f'physical detector is {latest_status[logical]["detectors"][det]["status"]}')
+                if latest_status[logical]['number'] != -1:
+                    msg += f' ({latest_status[logical]["number"]})'
                 logger.debug(msg)
         msg = (f"Linking: tpc-mv: {mc.is_linked('tpc', 'muon_veto')}, "
                f"tpc-nv: {mc.is_linked('tpc', 'neutron_veto')}, "
