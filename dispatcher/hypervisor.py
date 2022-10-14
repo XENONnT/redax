@@ -14,7 +14,7 @@ def date_now():
 
 
 class Hypervisor(object):
-    __version__ = '4.0.3'
+    __version__ = '4.0.4'
     def __init__(self,
                  db,
                  logger,
@@ -409,17 +409,42 @@ class Hypervisor(object):
         timeout_list, running_list = [], []
         physical_status = self.mongo_connect.physical_status
         latest_status = self.mongo_connect.latest_status
+        host_config = self.mongo_connect.host_config
+        phys_stat = {k: [] for k in config}
+        now_time = time.time()
         for logical in latest_status.keys():
             log_status = latest_status[logical]["status"]
+            for n, doc in latest_status[logical]['readers'].items():
+                if doc is None:
+                    self.logger.debug(f'{n} seems to have been offline for a few days')
+                    continue
+                det = host_config[doc['host']]
+                status = self.mongo_connect.extract_status(doc, now_time)
+                doc['status'] = status
+                phys_stat[det].append(status)
+                self.logger.debug(f'{det}: {doc["host"]} is in {status}')
+            for n, doc in self.latest_status[logical]['controller'].items():
+                if doc is None:
+                    self.logger.debug(f'{n} seems to have been offline for a few days')
+                    continue
+                det = host_config[doc['host']]
+                status = self.mongo_connect.extract_status(doc, now_time)
+                doc['status'] = status
+                phys_stat[det].append(status)
+                self.logger.debug(f'{det}: {doc["host"]} is in {status}')
             for det in latest_status[logical]['detectors'].keys():
-                phy_status = physical_status[det]['status']
-                logger.debug(f'{logical} is {log_status}, {det} is {phy_status}')
-                if phy_status in [daqnt.DAQ_STATUS.TIMEOUT]:
-                    timeout_list.append(phys_det)
+                phy_status = latest_status[logical]['detectors']['status']
+                agg_status = self.mongo_connect.combine_statuses(phys_stat[det])
+                self.logger.debug(f'{logical} is {log_status}, {det} is {phy_status} -> {agg_stat}')
+                #if phy_status in [daqnt.DAQ_STATUS.TIMEOUT]: timeout_list.append(phys_det)
+                #else: running_list.append(phys_det)
+                if (phy_status != agg_status) or (phy_status in ['ERROR','TIMEOUT','UNKNOWN']):
+                    timeout_list.append(det)
                 else:
-                    running_list.append(phys_det)
+                    running_list.append(det)
+                    
         self.logger.debug(f'These detectors are not in timeout: {running_list}, '
-                          f'these are in timeout: {ntimeout_list}')
+                          f'these are in timeout: {timeout_list}')
         # check if the TPC is part of the problem
         if 'tpc' in timeout_list:
             return False

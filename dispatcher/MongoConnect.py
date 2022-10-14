@@ -318,7 +318,7 @@ class MongoConnect(object):
                             f'{type(e)}, {e}')
             return None
         self.physical_status = phys_stat
-
+        
         # Aggregate status for the physical detectors
         for logical in self.latest_status.keys():
             for det in self.latest_status[logical]['detectors'].keys():
