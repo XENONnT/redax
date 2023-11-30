@@ -15,7 +15,7 @@ class DAQController():
     D. Masson, 06 Apr 2020
     S. di Pede, 17 Mar 2021
 
-    Brief: This code handles the logic of what the dispatcher does when. It takes in 
+    Brief: This code handles the logic of what the dispatcher does when. It takes in
     aggregated status updates and commands from the mongo connector and decides if
     any action needs to be taken to get the DAQ into the target state. It also handles the
     resetting of runs (the ~hourly stop/start) during normal operations.
@@ -74,12 +74,12 @@ class DAQController():
                 therefore unavailable. The frontend should prevent many of these cases though.
 
         The way that works is this:
-        A) the detector should be INACTIVE (i.e., IDLE), we stop the detector 
+        A) the detector should be INACTIVE (i.e., IDLE), we stop the detector
             if the status is in one of the active states
-        B) the detector should be ACTIVE (i.e, RUNNING), we issue the necessary 
+        B) the detector should be ACTIVE (i.e, RUNNING), we issue the necessary
             commands to put the system in the RUNNING status
-        C) we deal separately with the ERROR and TIMEOUT statuses, as in the 
-            first time we need to promptly stop the detector, and in the second 
+        C) we deal separately with the ERROR and TIMEOUT statuses, as in the
+            first time we need to promptly stop the detector, and in the second
             case we need to handle the timeouts.
         """
         # cache these so other functions can see them
@@ -91,6 +91,8 @@ class DAQController():
             if latest_status[det]['status'] == DAQ_STATUS.IDLE:
                 self.can_force_stop[det] = True
                 self.error_stop_count[det] = 0
+                if (now() - self.last_command['arm'][detector]).total_seconds() < self.time_between_commands):
+                    self.one_detector_arming = True
             if latest_status[det]['status'] in [DAQ_STATUS.ARMING, DAQ_STATUS.ARMED]:
                 self.one_detector_arming = True
 
@@ -225,7 +227,7 @@ class DAQController():
                 readers, cc = self.mongo.get_hosts_for_mode(ls[detector]['mode'])
                 hosts = (readers, cc)
                 delay = self.start_cmd_delay
-                #Reset arming timeout counter 
+                #Reset arming timeout counter
                 self.missed_arm_cycles[detector]=0
             else: # stop
                 readers, cc = self.mongo.get_hosts_for_mode(ls[detector]['mode'], detector)
@@ -255,9 +257,9 @@ class DAQController():
         return 0
 
     def check_timeouts(self, detector, command=None):
-        """ 
+        """
         This one is invoked if we think we need to change states. Either a stop command needs
-        to be sent, or we've detected an anomaly and want to decide what to do. 
+        to be sent, or we've detected an anomaly and want to decide what to do.
         Basically this function decides:
           - We are not in any timeouts: send the normal stop command
           - We are waiting for something: do nothing
