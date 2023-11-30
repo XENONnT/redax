@@ -91,7 +91,7 @@ class DAQController():
             if latest_status[det]['status'] == DAQ_STATUS.IDLE:
                 self.can_force_stop[det] = True
                 self.error_stop_count[det] = 0
-                if (now() - self.last_command['arm'][detector]).total_seconds() < self.time_between_commands):
+                if (now() - self.last_command['arm'][det]).total_seconds() < self.time_between_commands):
                     self.one_detector_arming = True
             if latest_status[det]['status'] in [DAQ_STATUS.ARMING, DAQ_STATUS.ARMED]:
                 self.one_detector_arming = True
