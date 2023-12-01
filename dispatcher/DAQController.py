@@ -88,13 +88,15 @@ class DAQController():
         self.one_detector_arming = False
 
         for det in latest_status.keys():
-            if latest_status[det]['status'] == DAQ_STATUS.IDLE:
+            if (
+                    (latest_status[det]['status'] in [DAQ_STATUS.ARMING, DAQ_STATUS.ARMED]) or
+                    ((latest_status[det]['status'] == DAQ_STATUS.IDLE) and  # Arming, but detector still reports IDLE
+                     (now() - self.last_command['arm'][det]).total_seconds() < self.time_between_commands)
+                    ):
+                self.one_detector_arming = True
+            elif latest_status[det]['status'] == DAQ_STATUS.IDLE:
                 self.can_force_stop[det] = True
                 self.error_stop_count[det] = 0
-                if (now() - self.last_command['arm'][det]).total_seconds() < self.time_between_commands):
-                    self.one_detector_arming = True
-            if latest_status[det]['status'] in [DAQ_STATUS.ARMING, DAQ_STATUS.ARMED]:
-                self.one_detector_arming = True
 
         active_states = [DAQ_STATUS.RUNNING, DAQ_STATUS.ARMED, DAQ_STATUS.ARMING, DAQ_STATUS.UNKNOWN]
 
