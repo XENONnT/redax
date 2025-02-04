@@ -8,18 +8,24 @@ class V1495_TPC : public V1495 {
     V1495_TPC(std::shared_ptr<MongoLog>&, std::shared_ptr<Options>&, int, int, unsigned);
     virtual ~V1495_TPC();
     virtual int Arm(std::map<std::string, int>&);
+    virtual int ArmSoft(std::map<std::string, int>&);
     virtual int BeforeSINStart();
     virtual int BeforeSINStop();
 
   protected:
-    const uint32_t fControlReg;
-    const uint32_t fVetoOffMSBReg;
-    const uint32_t fVetoOffLSBReg;
-    const uint32_t fVetoOnMSBReg;
-    const uint32_t fVetoOnLSBReg;
+    const uint32_t fModeReg;
+    const uint32_t fFracLtOnAReg;
+    const uint32_t fFracLtOnBReg;
+    const uint32_t fFracLtOffAReg;
+    const uint32_t fFracLtOffBReg;
+    const uint32_t fAntiVetoDelayAReg;
+    const uint32_t fAntiVetoDelayBReg;
+    const uint32_t fAntiVetoDurationAReg;
+    const uint32_t fAntiVetoDurationBReg;
 
-    int fFractionalModeActive;
-    uint32_t fVetoOn_clk, fVetoOff_clk;
+    uint32_t fMode;
+    uint32_t fFracLTVetoOn_clk, fFracLTVetoOff_clk;
+    uint32_t fAntiVetoDelay_clk, fAntiVetoDuration_clk;
 };
 
 #endif // _V1495_TPC_HH_ defined
