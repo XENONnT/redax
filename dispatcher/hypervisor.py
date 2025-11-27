@@ -380,7 +380,8 @@ class Hypervisor(object):
         if self.slackbot is not None:
             self.slackbot.send_message(
                 f'Hypervisor is restarting {host}',
-                add_tags=('daq',))
+                # add_tags=('daq',)
+                )
 
         if 0 not in self.kill_redax(host):
             self.logger.error(f'Error killing {host}?')
@@ -408,7 +409,10 @@ class Hypervisor(object):
         ok, not_ok = [], []
         physical_status = self.mongo_connect.physical_status
         for phys_det, statuses in physical_status.items():
-            if self.mongo_connect.combine_statuses(statuses) not in [daqnt.DAQ_STATUS.RUNNING, daqnt.DAQ_STATUS.ARMED]:
+            detector_combined_status = self.mongo_connect.combine_statuses(statuses)
+            self.logger.debug(f'{phys_det} has status {detector_combined_status}')
+            # if detector_combined_status in [daqnt.DAQ_STATUS.TIMEOUT, daqnt.DAQ_STATUS.ARMING]:
+            if detector_combined_status not in [daqnt.DAQ_STATUS.RUNNING, daqnt.DAQ_STATUS.ARMED]:
                 not_ok.append(phys_det)
             else:
                 ok.append(phys_det)
@@ -420,12 +424,15 @@ class Hypervisor(object):
         if len(ok) == len(physical_status):
             self.logger.error('Uh, how did you get here???')
             self.slackbot.send_message('This happened again, you should really'
-                    ' get someone to fix this', tags='ALL')
+                    ' get someone to fix this', 
+                    # tags='ALL'
+                    )
             raise ValueError('Why did this happen?')
 
         if self.slackbot is not None:
             self.slackbot.send_message('Hypervisor is unlinking detectors',
-                                       add_tags='ALL')
+                                       # add_tags='ALL',
+                                       )
 
         # ok, we aren't the problem, let's see about unlinking
         if len(ok) == 1:
@@ -614,7 +621,8 @@ class Hypervisor(object):
                 f'Responding {str(responding)}\n'
                 f'Timeout {str(timeout)}\n'
                 f'Level {str(authorization_level)}',
-                add_tags='ALL')
+                # add_tags='ALL'
+                )
         self.logger.info('%i responding, %i timeout' % (len(responding), len(timeout)))
         # all processes are either idle or timing out.
         # Make sure to first (force) quit redax instances prior to VMEs.

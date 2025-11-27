@@ -48,7 +48,7 @@ class DAQController():
         self.stop_retries = int(config['RetryReset'])
 
         self.hv_nuclear_timeout = int(config['HypervisorNuclearTimeout'])
-        self.last_nuke = now()
+        self.last_nuke = now() - datetime.timedelta(seconds=self.hv_nuclear_timeout)
 
         self.logger = logger
         self.time_between_commands = int(config['TimeBetweenCommands'])
