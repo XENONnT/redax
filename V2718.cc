@@ -13,7 +13,8 @@ V2718::~V2718(){
 }
 
 int V2718::Init(int link, int crate) {
-  if (CAENVME_Init(cvV2718, link, crate, &fBoardHandle))
+  uint32_t arg = link;
+  if (CAENVME_Init2(cvV2718, &arg, crate, &fBoardHandle))
     return -1;
   fLog->Entry(MongoLog::Local, "V2718 init, handle %i", fBoardHandle);
   return SendStopSignal(false);

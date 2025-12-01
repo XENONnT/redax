@@ -18,7 +18,7 @@ public:
   int GetHandle(){return fBoardHandle;};
 
 protected:
-  int fBoardHandle;
+  int32_t fBoardHandle;
   CrateOptions fCopts;
   std::shared_ptr<MongoLog> fLog;
 
