@@ -1,6 +1,12 @@
 #include "V2718.hh"
 #include "MongoLog.hh"
 #include <CAENVMElib.h>
+#include <cstdio>
+
+#define LOG(level, ...) do { \
+  if (fLog) fLog->Entry(level, __VA_ARGS__); \
+  else printf(__VA_ARGS__); \
+  } while(0)
 
 V2718::V2718(std::shared_ptr<MongoLog>& log, CrateOptions c_opts){
   fLog = log;
@@ -16,7 +22,7 @@ int V2718::Init(int link, int crate) {
   uint32_t arg = link;
   if (CAENVME_Init2(cvV2718, &arg, crate, &fBoardHandle))
     return -1;
-  fLog->Entry(MongoLog::Local, "V2718 init, handle %i", fBoardHandle);
+  LOG(MongoLog::Local, "V2718 init, handle %i", fBoardHandle);
   return SendStopSignal(false);
 }
 
@@ -40,11 +46,11 @@ int V2718::SendStartSignal(){
   unsigned int data = 0x0;
   int ret;
   if ((ret = CAENVME_ReadRegister(fBoardHandle, cvOutRegSet, &data)) != cvSuccess) {
-    fLog->Entry(MongoLog::Local, "Could not read V2718 output? ret %i", ret);
+    LOG(MongoLog::Local, "Could not read V2718 output? ret %i", ret);
     // fail?
   } else {
-    fLog->Entry(MongoLog::Local, "Current V2718 output status: %x", data);
-    if (data & cvOut0Bit) fLog->Entry(MongoLog::Local, "Orphaned S-IN?");
+    LOG(MongoLog::Local, "Current V2718 output status: %x", data);
+    if (data & cvOut0Bit) LOG(MongoLog::Local, "Orphaned S-IN?");
   }
 
   data = 0;
@@ -59,7 +65,7 @@ int V2718::SendStartSignal(){
 
   // S-IN and logic signals 
   if(CAENVME_SetOutputRegister(fBoardHandle,data)!=0){
-    fLog->Entry(MongoLog::Error, "Couldn't set output register to crate controller");
+    LOG(MongoLog::Error, "Couldn't set output register to crate controller");
     return -1;
   }
 
@@ -78,12 +84,12 @@ int V2718::SendStartSignal(){
       if (fCopts.pulser_freq < 1./widths[i]) {
         period = std::clamp(int(1./(widths[i]*fCopts.pulser_freq)), 1, 0xFF);
         tu = tus[i];
-        fLog->Entry(MongoLog::Debug, "Closest freq to %.1f Hz is %.1f",
+        LOG(MongoLog::Debug, "Closest freq to %.1f Hz is %.1f",
               fCopts.pulser_freq, 1./(period*widths[i]));
         break;
       }
       if (i == 3) {
-        fLog->Entry(MongoLog::Error, "Given an invalid LED frequency");
+        LOG(MongoLog::Error, "Given an invalid LED frequency");
         return -1;
       }
     }
@@ -92,7 +98,7 @@ int V2718::SendStartSignal(){
                                     cvManualSW, cvManualSW);
     ret *= CAENVME_StartPulser(fBoardHandle,cvPulserB);
     if(ret != cvSuccess){
-      fLog->Entry(MongoLog::Warning, "Failed to activate LED pulser");
+      LOG(MongoLog::Warning, "Failed to activate LED pulser");
       return -1;
     }
   }
@@ -123,20 +129,20 @@ int V2718::SendStopSignal(bool end){
   unsigned int data = 0x0;
   int ret;
   if ((ret = CAENVME_ReadRegister(fBoardHandle, cvOutRegSet, &data)) != cvSuccess) {
-    fLog->Entry(MongoLog::Local, "Could not read V2718 output? ret %i", ret);
+    LOG(MongoLog::Local, "Could not read V2718 output? ret %i", ret);
     // fail?
   } else {
-    fLog->Entry(MongoLog::Local, "Current V2718 output status: %x", data);
-    if (data & cvOut0Bit) fLog->Entry(MongoLog::Local, "Orphaned S-IN?");
+    LOG(MongoLog::Local, "Current V2718 output status: %x", data);
+    if (data & cvOut0Bit) LOG(MongoLog::Local, "Orphaned S-IN?");
   }
 
   // Set the output register
   data = 0;
   CAENVME_SetOutputRegister(fBoardHandle, data);
-  fLog->Entry(MongoLog::Local, "V2718 output reset");
+  LOG(MongoLog::Local, "V2718 output reset");
   if(end){
     if(CAENVME_End(fBoardHandle)!= cvSuccess){
-      fLog->Entry(MongoLog::Warning, "Failed to end crate");
+      LOG(MongoLog::Warning, "Failed to end crate");
     }
     fBoardHandle=-1;
   }
