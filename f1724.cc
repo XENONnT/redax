@@ -112,6 +112,7 @@ unsigned int f1724::ReadRegister(unsigned int) {
   return 0;
 }
 
+/* Old Implemetation
 int f1724::Read(std::unique_ptr<data_packet>& outptr) {
   if (fBufferSize == 0) return 0;
   const std::lock_guard<std::mutex> lk(fBufferMutex);
@@ -120,6 +121,17 @@ int f1724::Read(std::unique_ptr<data_packet>& outptr) {
   outptr = std::make_unique<data_packet>(std::move(fBuffer), ht, cc);
   fBufferSize = 0;
   return retwords;
+}
+*/
+int f1724::Read(std::unique_ptr<data_packet>& outptr) {
+    if (!fBufferReady || fBufferSize == 0) return 0;  // only read when buffer is complete
+    const std::lock_guard<std::mutex> lk(fBufferMutex);
+    int retwords = fBuffer.size();
+    auto [ht, cc] = GetClockInfo(fBuffer);
+    outptr = std::make_unique<data_packet>(std::move(fBuffer), ht, cc);
+    fBufferSize = 0;
+    fBufferReady = false;  // reset for next event
+    return retwords;
 }
 
 int f1724::SWTrigger() {
@@ -406,6 +418,7 @@ void f1724::ConvertToDigiFormat(const vector<vector<double>>& wf, int mask, long
     const std::lock_guard<std::mutex> lg(fBufferMutex);
     fBuffer.append(buffer);
     fBufferSize = fBuffer.size();
+    fBufferReady = true;  // mark buffer as complete and safe to read
   }
   return;
 }
