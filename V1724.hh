@@ -78,6 +78,7 @@ protected:
   unsigned int fPreTrigRegister;
   unsigned int fPreTrigChRegister;
   int fBufferSize;
+  std::atomic_bool fBufferReady {false};
 
   std::vector<int> fBLTalloc;
   std::map<int, int> fBLTCounter;
