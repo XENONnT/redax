@@ -63,6 +63,7 @@ This mirrors Redax behavior where included docs are merged first and root/overri
 | Post-trigger | `post_trigger` | `--post-trigger` |
 | Extra register writes | `registers[]` (`board`, `reg`, `val`) | `--reg` |
 | Start mode | `run_start` (`0=software`, nonzero=`sin`) | `--start-mode` |
+| First-trigger explicit SW control | n/a | `--mode10-explicit-start-stop` |
 | Sleep between polls | `us_between_reads` | `--sleep-us` |
 | Serial-number check | `do_sn_check` | `--do-sn-check` |
 | Reset at startup | n/a | `--no-reset` |
@@ -114,6 +115,7 @@ Some testing knobs
 - `--reg REG=VAL` (repeat): copy register writes from your current options
 - `--trigger-mask` / `--post-trigger`: convenience fields for common registers
 - `--start-mode software|sin`
+- `--mode10-explicit-start-stop`: force `AQ_CTRL` mode bits `[1:0]=10`, write `0x106` to arm/start mode, issue one software trigger pulse (`0x8108=0x1`), and stop via `0x102`.
 - `--buffer-bytes`, `--sleep-us`: readout behavior
 
 ## Useful Debug Flags

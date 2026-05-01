@@ -25,6 +25,7 @@ namespace {
 
 constexpr uint32_t REG_AQ_CTRL = 0x8100;
 constexpr uint32_t REG_AQ_STATUS = 0x8104;
+constexpr uint32_t REG_SW_TRIG = 0x8108;
 constexpr uint32_t REG_TRIG_SRC_MASK = 0x810C;
 constexpr uint32_t REG_POST_TRIG = 0x8114;
 constexpr uint32_t REG_CH_ENABLE_MASK = 0x8120;
@@ -56,6 +57,7 @@ struct Options {
   std::vector<std::pair<uint32_t, uint32_t>> reg_writes;
 
   std::string start_mode = "software";
+  bool mode10_explicit_start_stop = false;
   bool do_reset = true;
   bool do_sn_check = false;
   bool continue_on_read_error = false;
@@ -82,6 +84,7 @@ struct CliOverrides {
   std::optional<uint32_t> post_trigger;
   std::vector<std::pair<uint32_t, uint32_t>> reg_writes;
   std::optional<std::string> start_mode;
+  std::optional<bool> mode10_explicit_start_stop;
   std::optional<bool> do_reset;
   std::optional<bool> do_sn_check;
   std::optional<bool> continue_on_read_error;
@@ -155,6 +158,7 @@ void PrintUsage(const char* argv0) {
       << "\n"
       << "Run control:\n"
       << "  --start-mode software|sin   Acquisition start mode (default software)\n"
+      << "  --mode10-explicit-start-stop  Force AQ_CTRL mode[1:0]=10 and explicit SW start/stop\n"
       << "  --duration-s <float>        Run duration in seconds (default 30)\n"
       << "  --max-packets <int>         Stop after N packets with data (0 = unlimited)\n"
       << "  --sleep-us <int>            Poll sleep in us (default 10)\n"
@@ -900,6 +904,9 @@ void ApplyCliOverrides(const CliOverrides& cli, Options* opt) {
     for (const auto& rv : cli.reg_writes) opt->reg_writes.push_back(rv);
   }
   if (cli.start_mode.has_value()) opt->start_mode = *cli.start_mode;
+  if (cli.mode10_explicit_start_stop.has_value()) {
+    opt->mode10_explicit_start_stop = *cli.mode10_explicit_start_stop;
+  }
   if (cli.do_reset.has_value()) opt->do_reset = *cli.do_reset;
   if (cli.do_sn_check.has_value()) opt->do_sn_check = *cli.do_sn_check;
   if (cli.continue_on_read_error.has_value()) {
@@ -987,6 +994,8 @@ bool ParseArgs(int argc, char** argv, CliOverrides* cli) {
       std::string v = need("--start-mode");
       if (v != "software" && v != "sin") return false;
       cli->start_mode = v;
+    } else if (a == "--mode10-explicit-start-stop") {
+      cli->mode10_explicit_start_stop = true;
     } else if (a == "--duration-s") {
       double v = 0.0;
       if (!ParseDouble(need("--duration-s"), &v) || v <= 0.0) {
@@ -1283,9 +1292,25 @@ int main(int argc, char** argv) {
   }
 
   uint32_t start_word = (opt.start_mode == "sin") ? 0x105 : 0x104;
+  uint32_t stop_word = 0x100;
+  bool issue_sw_start = false;
+  if (opt.mode10_explicit_start_stop) {
+    // [1:0]=10 first-trigger controlled, bit[2]=1 arm, bit[2]=0 disarm/stop.
+    start_word = 0x106;
+    stop_word = 0x102;
+    issue_sw_start = true;
+    std::cout << "Mode10 explicit start/stop enabled. AQ_CTRL start=0x106 stop=0x102\n";
+  }
   if (!WriteReg(handle, opt.base_address, REG_AQ_CTRL, start_word)) {
     cleanup();
     return 1;
+  }
+  if (issue_sw_start) {
+    if (!WriteReg(handle, opt.base_address, REG_SW_TRIG, 0x1)) {
+      cleanup();
+      return 1;
+    }
+    std::cout << "Issued explicit SW trigger start pulse (0x8108=0x1)\n";
   }
   if (!WaitStatusBit(handle, opt.base_address, STATUS_RUN, true, 1000, 1000)) {
     std::cerr << "warning: run bit did not assert\n";
@@ -1450,7 +1475,7 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::microseconds(opt.read_sleep_us));
   }
 
-  (void)WriteReg(handle, opt.base_address, REG_AQ_CTRL, 0x100);
+  (void)WriteReg(handle, opt.base_address, REG_AQ_CTRL, stop_word);
   (void)WaitStatusBit(handle, opt.base_address, STATUS_RUN, false, 1000, 1000);
 
   auto t1 = std::chrono::steady_clock::now();
