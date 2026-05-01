@@ -7,7 +7,7 @@ It does NOT acknowledge control commands and is not meant to emulate
 an operating readout process.
 
 python3 board_test/spoof_reader_status.py \
-  --uri 'mongodb://daq:${MONGO_PASSWORD_DAQ}@192.168.131.1:27020/admin' \
+  --uri "mongodb://daq:${MONGO_PASSWORD_DAQ}@192.168.131.1:27020/admin" \
   --db daq \
   --host "$(hostname)_reader_0" \
   --detector tpc \

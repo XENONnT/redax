@@ -180,7 +180,7 @@ If dispatcher/hypervisor must stay online, run this helper to keep one reader ho
 
 ```bash
 python3 board_test/spoof_reader_status.py \
-  --uri 'mongodb://daq:${MONGO_PASSWORD_DAQ}@192.168.131.1:27020/admin' \
+  --uri "mongodb://daq:${MONGO_PASSWORD_DAQ}@192.168.131.1:27020/admin" \
   --db daq \
   --host "$(hostname)_reader_0" \
   --detector tpc \
