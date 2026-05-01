@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
+#include <array>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -108,6 +110,12 @@ struct Stats {
   int64_t parsed_events = 0;
   int64_t event_full_seen = 0;
   int64_t saved_packets = 0;
+
+  // Redax-like channel accounting: waveform payload bytes per channel.
+  std::array<int64_t, 8> channel_wave_bytes_total{};
+  int64_t rate_windows_1s = 0;
+  int64_t channel_wave_bytes_windows_total = 0;
+  int64_t max_channel_wave_bytes_1s = 0;
 };
 
 struct PacketCheck {
@@ -1081,6 +1089,46 @@ PacketCheck CheckPacket(const uint32_t* words, size_t n_words) {
   return out;
 }
 
+// Parse V1724 event/channel headers and accumulate waveform payload bytes per channel.
+// This mirrors redax's GetDataPerChan basis: samples_in_pulse * sizeof(uint16_t),
+// which is equivalent to (channel_words - 2) * sizeof(uint32_t) for V1724.
+bool ParseChannelWaveBytesV1724(const uint32_t* words, size_t n_words,
+                                std::array<int64_t, 8>* out_bytes) {
+  size_t i = 0;
+  while (i < n_words) {
+    const uint32_t w = words[i];
+    if ((w >> 28U) != 0xAU) {
+      ++i;
+      continue;
+    }
+
+    const uint32_t ev_words = w & 0x0FFFFFFFU;
+    const size_t remaining = n_words - i;
+    if (ev_words < 4U || ev_words > remaining) {
+      return false;
+    }
+
+    const size_t ev_end = i + static_cast<size_t>(ev_words);
+    const uint32_t channel_mask = words[i + 1] & 0xFFU;
+    size_t ev_pos = i + 4;  // first channel header in V1724 format
+
+    for (int ch = 0; ch < 8; ++ch) {
+      if ((channel_mask & (1U << ch)) == 0U) continue;
+      if (ev_pos >= ev_end) return false;
+
+      const uint32_t ch_words = words[ev_pos] & 0x7FFFFFU;
+      if (ch_words < 2U) return false;
+      const size_t ch_words_sz = static_cast<size_t>(ch_words);
+      if (ev_pos + ch_words_sz > ev_end) return false;
+
+      (*out_bytes)[ch] += static_cast<int64_t>(ch_words - 2U) * static_cast<int64_t>(sizeof(uint32_t));
+      ev_pos += ch_words_sz;
+    }
+    i = ev_end;
+  }
+  return true;
+}
+
 bool DumpPacket(const std::string& prefix, int64_t packet_idx, const uint8_t* data,
                 int64_t nbytes) {
   std::ostringstream oss;
@@ -1224,12 +1272,29 @@ int main(int argc, char** argv) {
   }
 
   Stats stats;
+  std::array<int64_t, 8> channel_wave_bytes_window{};
+  constexpr auto kRateWindow = std::chrono::seconds(1);
   std::vector<uint8_t> read_buffer(static_cast<size_t>(opt.buffer_bytes), 0);
   auto t0 = std::chrono::steady_clock::now();
   auto t_end = t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(opt.duration_s));
+  auto rate_window_start = t0;
+
+  auto flush_rate_windows = [&](std::chrono::steady_clock::time_point now) {
+    while (rate_window_start + kRateWindow <= now) {
+      for (int ch = 0; ch < 8; ++ch) {
+        stats.channel_wave_bytes_windows_total += channel_wave_bytes_window[ch];
+        stats.max_channel_wave_bytes_1s =
+            std::max(stats.max_channel_wave_bytes_1s, channel_wave_bytes_window[ch]);
+        channel_wave_bytes_window[ch] = 0;
+      }
+      stats.rate_windows_1s++;
+      rate_window_start += kRateWindow;
+    }
+  };
 
   while (std::chrono::steady_clock::now() < t_end) {
+    flush_rate_windows(std::chrono::steady_clock::now());
     stats.loops++;
     uint32_t status = 0;
     if (!ReadReg(handle, opt.base_address, REG_AQ_STATUS, &status)) {
@@ -1319,6 +1384,19 @@ int main(int argc, char** argv) {
     PacketCheck check = CheckPacket(words, n_words);
     stats.parsed_events += check.events;
 
+    std::array<int64_t, 8> packet_ch_wave_bytes{};
+    bool parsed_channels = ParseChannelWaveBytesV1724(words, n_words, &packet_ch_wave_bytes);
+    if (!parsed_channels) {
+      if (!check.invalid) {
+        std::cerr << "channel parse failed packet=" << stats.packets << "\n";
+      }
+    } else {
+      for (int ch = 0; ch < 8; ++ch) {
+        stats.channel_wave_bytes_total[ch] += packet_ch_wave_bytes[ch];
+        channel_wave_bytes_window[ch] += packet_ch_wave_bytes[ch];
+      }
+    }
+
     if (check.invalid) {
       stats.invalid_markers++;
       std::cerr << "invalid marker packet=" << stats.packets
@@ -1356,8 +1434,38 @@ int main(int argc, char** argv) {
   (void)WaitStatusBit(handle, opt.base_address, STATUS_RUN, false, 1000, 1000);
 
   auto t1 = std::chrono::steady_clock::now();
+  flush_rate_windows(t1);
   double dt = std::chrono::duration<double>(t1 - t0).count();
   double mib = static_cast<double>(stats.bytes) / (1024.0 * 1024.0);
+  const uint32_t effective_mask = opt.apply_channel_mask ? opt.channel_mask : 0xFFU;
+  int enabled_channels = 0;
+  for (int ch = 0; ch < 8; ++ch) {
+    if (effective_mask & (1U << ch)) enabled_channels++;
+  }
+  if (enabled_channels <= 0) enabled_channels = 8;
+
+  int64_t max_channel_total_bytes = 0;
+  int64_t total_wave_bytes = 0;
+  for (int ch = 0; ch < 8; ++ch) {
+    max_channel_total_bytes =
+        std::max(max_channel_total_bytes, stats.channel_wave_bytes_total[ch]);
+    total_wave_bytes += stats.channel_wave_bytes_total[ch];
+  }
+
+  const double safe_dt = dt > 0.0 ? dt : 1.0;
+  const double avg_runtime_per_channel_kibps =
+      static_cast<double>(total_wave_bytes) / safe_dt / static_cast<double>(enabled_channels) /
+      1024.0;
+  const double max_runtime_per_channel_kibps =
+      static_cast<double>(max_channel_total_bytes) / safe_dt / 1024.0;
+  const double avg_1s_over_time_channels_kib =
+      (stats.rate_windows_1s > 0)
+          ? (static_cast<double>(stats.channel_wave_bytes_windows_total) /
+             static_cast<double>(stats.rate_windows_1s * enabled_channels) / 1024.0)
+          : 0.0;
+  const double max_1s_any_channel_kib =
+      static_cast<double>(stats.max_channel_wave_bytes_1s) / 1024.0;
+
   std::cout << "\nSummary\n"
             << "  elapsed_s: " << dt << "\n"
             << "  loops: " << stats.loops << "\n"
@@ -1370,7 +1478,15 @@ int main(int argc, char** argv) {
             << "  bus_error_terminations: " << stats.bus_error_terminations << "\n"
             << "  read_errors: " << stats.read_errors << "\n"
             << "  event_full_seen: " << stats.event_full_seen << "\n"
-            << "  saved_packets: " << stats.saved_packets << "\n";
+            << "  saved_packets: " << stats.saved_packets << "\n"
+            << "  channel_rate_avg_runtime_per_channel_kiBps: " << std::fixed
+            << std::setprecision(2) << avg_runtime_per_channel_kibps << "\n"
+            << "  channel_rate_max_runtime_per_channel_kiBps: "
+            << max_runtime_per_channel_kibps << "\n"
+            << "  channel_rate_avg_1s_over_time_channels_kiB: "
+            << avg_1s_over_time_channels_kib << "\n"
+            << "  channel_rate_max_1s_any_channel_kiB: " << max_1s_any_channel_kib
+            << "\n";
 
   cleanup();
   return 0;
