@@ -115,7 +115,7 @@ Some testing knobs
 - `--reg REG=VAL` (repeat): copy register writes from your current options
 - `--trigger-mask` / `--post-trigger`: convenience fields for common registers
 - `--start-mode software|sin`
-- `--mode10-explicit-start-stop`: force `AQ_CTRL` mode bits `[1:0]=10`, write `0x106` to arm/start mode, issue one software trigger pulse (`0x8108=0x1`), and stop via `0x102`.
+- `--mode10-explicit-start-stop`: force `AQ_CTRL` mode bits `[1:0]=10`, write `0x106` to arm/start mode, force-enable SW trigger source bit (`0x810C[31]`), issue two software trigger pulses (`0x8108=0x1` x2: first to start, second to request first event), and stop via `0x102`.
 - `--buffer-bytes`, `--sleep-us`: readout behavior
 
 ## Useful Debug Flags

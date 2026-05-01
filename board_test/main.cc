@@ -1301,16 +1301,53 @@ int main(int argc, char** argv) {
     issue_sw_start = true;
     std::cout << "Mode10 explicit start/stop enabled. AQ_CTRL start=0x106 stop=0x102\n";
   }
+
+  if (opt.mode10_explicit_start_stop) {
+    uint32_t trig_mask = 0;
+    if (ReadReg(handle, opt.base_address, REG_TRIG_SRC_MASK, &trig_mask)) {
+      const uint32_t new_mask = trig_mask | 0x80000000U;
+      if (new_mask != trig_mask) {
+        if (!WriteReg(handle, opt.base_address, REG_TRIG_SRC_MASK, new_mask)) {
+          cleanup();
+          return 1;
+        }
+        std::cout << "Mode10: enabled SW trigger source bit. trig_mask 0x"
+                  << std::hex << trig_mask << " -> 0x" << new_mask << std::dec << "\n";
+      } else {
+        std::cout << "Mode10: SW trigger source bit already enabled in trig_mask=0x"
+                  << std::hex << trig_mask << std::dec << "\n";
+      }
+    } else {
+      std::cerr << "warning: could not read trigger mask before mode10 start\n";
+    }
+  }
+
   if (!WriteReg(handle, opt.base_address, REG_AQ_CTRL, start_word)) {
     cleanup();
     return 1;
   }
   if (issue_sw_start) {
+    // In mode10, first trigger starts acquisition and is not an event trigger.
+    // Send two pulses so we request both start and first event.
     if (!WriteReg(handle, opt.base_address, REG_SW_TRIG, 0x1)) {
       cleanup();
       return 1;
     }
-    std::cout << "Issued explicit SW trigger start pulse (0x8108=0x1)\n";
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+    if (!WriteReg(handle, opt.base_address, REG_SW_TRIG, 0x1)) {
+      cleanup();
+      return 1;
+    }
+    std::cout << "Issued two explicit SW trigger pulses (0x8108=0x1 x2)\n";
+  }
+  if (opt.mode10_explicit_start_stop) {
+    uint32_t aq_ctrl_rb = 0;
+    uint32_t trig_mask_rb = 0;
+    (void)ReadReg(handle, opt.base_address, REG_AQ_CTRL, &aq_ctrl_rb);
+    (void)ReadReg(handle, opt.base_address, REG_TRIG_SRC_MASK, &trig_mask_rb);
+    std::cout << "Mode10 readback: AQ_CTRL=0x" << std::hex << aq_ctrl_rb
+              << " TRIG_SRC_MASK=0x" << trig_mask_rb << std::dec << "\n"
+              << "Note: in mode10, status bit[2] reports ARMED state until first accepted trigger edge.\n";
   }
   if (!WaitStatusBit(handle, opt.base_address, STATUS_RUN, true, 1000, 1000)) {
     std::cerr << "warning: run bit did not assert\n";
