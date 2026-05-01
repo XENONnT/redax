@@ -6,12 +6,15 @@
 #include <climits>
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -96,6 +99,12 @@ struct PacketCheck {
   uint32_t advertised_words = 0;
   size_t bad_index = 0;
   size_t remaining_words = 0;
+};
+
+struct PacketWork {
+  int64_t packet_id = 0;
+  int64_t nbytes = 0;
+  std::vector<uint8_t> data;
 };
 
 void PrintUsage(const char* argv0) {
@@ -631,10 +640,17 @@ int main(int argc, char** argv) {
     std::cerr << "warning: run bit did not assert\n";
   }
 
-  Stats stats;
+  Stats read_stats;
+  Stats parse_stats;
   std::array<int64_t, 8> channel_wave_bytes_window{};
   constexpr auto kRateWindow = std::chrono::seconds(1);
   std::vector<uint8_t> read_buffer(static_cast<size_t>(opt.buffer_bytes), 0);
+  std::deque<PacketWork> packet_queue;
+  std::mutex queue_mutex;
+  std::condition_variable queue_not_empty;
+  std::condition_variable queue_not_full;
+  constexpr size_t kMaxQueuedPackets = 64;
+  bool reader_done = false;
   auto t0 = std::chrono::steady_clock::now();
   auto t_end = t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(opt.duration_s));
@@ -643,32 +659,79 @@ int main(int argc, char** argv) {
   auto flush_rate_windows = [&](std::chrono::steady_clock::time_point now) {
     while (rate_window_start + kRateWindow <= now) {
       for (int ch = 0; ch < 8; ++ch) {
-        stats.channel_wave_bytes_windows_total += channel_wave_bytes_window[ch];
-        stats.max_channel_wave_bytes_1s =
-            std::max(stats.max_channel_wave_bytes_1s, channel_wave_bytes_window[ch]);
+        parse_stats.channel_wave_bytes_windows_total += channel_wave_bytes_window[ch];
+        parse_stats.max_channel_wave_bytes_1s =
+            std::max(parse_stats.max_channel_wave_bytes_1s, channel_wave_bytes_window[ch]);
         channel_wave_bytes_window[ch] = 0;
       }
-      stats.rate_windows_1s++;
+      parse_stats.rate_windows_1s++;
       rate_window_start += kRateWindow;
     }
   };
 
+  std::thread parser_thread([&]() {
+    while (true) {
+      PacketWork work;
+      {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        queue_not_empty.wait(lock, [&]() { return !packet_queue.empty() || reader_done; });
+        if (packet_queue.empty() && reader_done) {
+          break;
+        }
+        work = std::move(packet_queue.front());
+        packet_queue.pop_front();
+      }
+      queue_not_full.notify_one();
+
+      flush_rate_windows(std::chrono::steady_clock::now());
+
+      const size_t n_words = static_cast<size_t>(work.nbytes / 4);
+      const auto* words = reinterpret_cast<const uint32_t*>(work.data.data());
+      PacketCheck check = CheckPacket(words, n_words);
+      parse_stats.parsed_events += check.events;
+
+      std::array<int64_t, 8> packet_ch_wave_bytes{};
+      bool parsed_channels = ParseChannelWaveBytesV1724(words, n_words, &packet_ch_wave_bytes);
+      if (!parsed_channels) {
+        if (!check.invalid) {
+          std::cerr << "channel parse failed packet=" << work.packet_id << "\n";
+        }
+      } else {
+        for (int ch = 0; ch < 8; ++ch) {
+          parse_stats.channel_wave_bytes_total[ch] += packet_ch_wave_bytes[ch];
+          channel_wave_bytes_window[ch] += packet_ch_wave_bytes[ch];
+        }
+      }
+
+      if (check.invalid) {
+        parse_stats.invalid_markers++;
+        std::cerr << "invalid marker packet=" << work.packet_id
+                  << " idx=" << check.bad_index
+                  << " advertised_words=" << check.advertised_words
+                  << " remaining_words=" << check.remaining_words
+                  << " word=0x" << std::hex << check.bad_word << std::dec << "\n";
+        if (opt.dump_invalid_prefix.has_value()) {
+          DumpPacket(*opt.dump_invalid_prefix, work.packet_id, work.data.data(), work.nbytes);
+        }
+      }
+    }
+  });
+
   while (std::chrono::steady_clock::now() < t_end) {
-    flush_rate_windows(std::chrono::steady_clock::now());
-    stats.loops++;
+    read_stats.loops++;
     uint32_t status = 0;
     if (!ReadReg(handle, opt.base_address, REG_AQ_STATUS, &status)) {
-      stats.read_errors++;
+      read_stats.read_errors++;
       if (!opt.continue_on_read_error) break;
       std::this_thread::sleep_for(std::chrono::microseconds(opt.read_sleep_us));
       continue;
     }
 
-    if (status & STATUS_EVENT_FULL) stats.event_full_seen++;
+    if (status & STATUS_EVENT_FULL) read_stats.event_full_seen++;
 
     if ((status & STATUS_EVENT_READY) == 0) {
-      if (stats.loops % opt.status_period == 0) {
-        std::cout << "loop=" << stats.loops << " status=0x" << std::hex << status
+      if (read_stats.loops % opt.status_period == 0) {
+        std::cout << "loop=" << read_stats.loops << " status=0x" << std::hex << status
                   << std::dec << " ready=0\n";
       }
       std::this_thread::sleep_for(std::chrono::microseconds(opt.read_sleep_us));
@@ -693,12 +756,12 @@ int main(int argc, char** argv) {
           remaining, cvA32_U_MBLT, cvD64, &nb);
 
       if (cycle_ret != cvSuccess && cycle_ret != cvBusError) {
-        stats.read_errors++;
+        read_stats.read_errors++;
         std::cerr << "read cycle failed ret=" << cycle_ret << " nb=" << nb << "\n";
         break;
       }
       if (cycle_ret == cvSuccess && nb == 0) {
-        stats.read_errors++;
+        read_stats.read_errors++;
         cycle_ret = -998;
         std::cerr << "read cycle returned success with zero bytes\n";
         break;
@@ -713,7 +776,7 @@ int main(int argc, char** argv) {
       total_bytes += nb;
 
       if (cycle_ret == cvBusError) {
-        stats.bus_error_terminations++;
+        read_stats.bus_error_terminations++;
         break;
       }
     }
@@ -723,65 +786,51 @@ int main(int argc, char** argv) {
       continue;
     }
     if (overflow) {
-      stats.read_errors++;
+      read_stats.read_errors++;
       if (!opt.continue_on_read_error) break;
       continue;
     }
 
-    stats.packets++;
+    read_stats.packets++;
     if (total_bytes <= 0) continue;
-    stats.packets_with_data++;
-    stats.bytes += total_bytes;
+    read_stats.packets_with_data++;
+    read_stats.bytes += total_bytes;
     if (opt.save_packets) {
-      if (DumpPacket(opt.save_packets_prefix, stats.packets, read_buffer.data(), total_bytes)) {
-        stats.saved_packets++;
+      if (DumpPacket(opt.save_packets_prefix, read_stats.packets, read_buffer.data(),
+                     total_bytes)) {
+        read_stats.saved_packets++;
       }
     }
 
-    const size_t n_words = static_cast<size_t>(total_bytes / 4);
-    const auto* words = reinterpret_cast<const uint32_t*>(read_buffer.data());
-    PacketCheck check = CheckPacket(words, n_words);
-    stats.parsed_events += check.events;
-
-    std::array<int64_t, 8> packet_ch_wave_bytes{};
-    bool parsed_channels = ParseChannelWaveBytesV1724(words, n_words, &packet_ch_wave_bytes);
-    if (!parsed_channels) {
-      if (!check.invalid) {
-        std::cerr << "channel parse failed packet=" << stats.packets << "\n";
-      }
-    } else {
-      for (int ch = 0; ch < 8; ++ch) {
-        stats.channel_wave_bytes_total[ch] += packet_ch_wave_bytes[ch];
-        channel_wave_bytes_window[ch] += packet_ch_wave_bytes[ch];
-      }
+    PacketWork work;
+    work.packet_id = read_stats.packets;
+    work.nbytes = total_bytes;
+    work.data.assign(read_buffer.begin(), read_buffer.begin() + total_bytes);
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex);
+      queue_not_full.wait(lock, [&]() { return packet_queue.size() < kMaxQueuedPackets; });
+      packet_queue.emplace_back(std::move(work));
     }
+    queue_not_empty.notify_one();
 
-    if (check.invalid) {
-      stats.invalid_markers++;
-      std::cerr << "invalid marker packet=" << stats.packets
-                << " idx=" << check.bad_index
-                << " advertised_words=" << check.advertised_words
-                << " remaining_words=" << check.remaining_words
-                << " word=0x" << std::hex << check.bad_word << std::dec << "\n";
-      if (opt.dump_invalid_prefix.has_value()) {
-        DumpPacket(*opt.dump_invalid_prefix, stats.packets, read_buffer.data(), total_bytes);
-      }
-    }
-
-    if (stats.packets % opt.status_period == 0) {
+    if (read_stats.packets % opt.status_period == 0) {
       uint32_t pll = 0;
       uint32_t ros = 0;
       (void)ReadReg(handle, opt.base_address, REG_BOARD_FAIL, &pll);
       (void)ReadReg(handle, opt.base_address, REG_READOUT_STATUS, &ros);
-      std::cout << "packet=" << stats.packets << " bytes=" << total_bytes
-                << " events=" << check.events
-                << " invalid=" << (check.invalid ? 1 : 0)
+      size_t qsize = 0;
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        qsize = packet_queue.size();
+      }
+      std::cout << "packet=" << read_stats.packets << " bytes=" << total_bytes
                 << " cycle_ret=" << CvName(cycle_ret) << "(" << cycle_ret << ")"
+                << " q=" << qsize
                 << " pll=0x" << std::hex << pll << " ros=0x" << ros << std::dec
                 << "\n";
     }
 
-    if (opt.max_packets > 0 && stats.packets_with_data >= opt.max_packets) {
+    if (opt.max_packets > 0 && read_stats.packets_with_data >= opt.max_packets) {
       break;
     }
 
@@ -791,10 +840,17 @@ int main(int argc, char** argv) {
   (void)WriteReg(handle, opt.base_address, REG_AQ_CTRL, stop_word);
   (void)WaitStatusBit(handle, opt.base_address, STATUS_RUN, false, 1000, 1000);
 
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    reader_done = true;
+  }
+  queue_not_empty.notify_all();
+  parser_thread.join();
+
   auto t1 = std::chrono::steady_clock::now();
   flush_rate_windows(t1);
   double dt = std::chrono::duration<double>(t1 - t0).count();
-  double mib = static_cast<double>(stats.bytes) / (1024.0 * 1024.0);
+  double mib = static_cast<double>(read_stats.bytes) / (1024.0 * 1024.0);
   const uint32_t effective_mask = opt.apply_channel_mask ? opt.channel_mask : 0xFFU;
   int enabled_channels = 0;
   for (int ch = 0; ch < 8; ++ch) {
@@ -806,8 +862,8 @@ int main(int argc, char** argv) {
   int64_t total_wave_bytes = 0;
   for (int ch = 0; ch < 8; ++ch) {
     max_channel_total_bytes =
-        std::max(max_channel_total_bytes, stats.channel_wave_bytes_total[ch]);
-    total_wave_bytes += stats.channel_wave_bytes_total[ch];
+        std::max(max_channel_total_bytes, parse_stats.channel_wave_bytes_total[ch]);
+    total_wave_bytes += parse_stats.channel_wave_bytes_total[ch];
   }
 
   const double safe_dt = dt > 0.0 ? dt : 1.0;
@@ -817,26 +873,27 @@ int main(int argc, char** argv) {
   const double max_runtime_per_channel_kibps =
       static_cast<double>(max_channel_total_bytes) / safe_dt / 1024.0;
   const double avg_1s_over_time_channels_kib =
-      (stats.rate_windows_1s > 0)
-          ? (static_cast<double>(stats.channel_wave_bytes_windows_total) /
-             static_cast<double>(stats.rate_windows_1s * enabled_channels) / 1024.0)
+      (parse_stats.rate_windows_1s > 0)
+          ? (static_cast<double>(parse_stats.channel_wave_bytes_windows_total) /
+             static_cast<double>(parse_stats.rate_windows_1s * enabled_channels) / 1024.0)
           : 0.0;
   const double max_1s_any_channel_kib =
-      static_cast<double>(stats.max_channel_wave_bytes_1s) / 1024.0;
+      static_cast<double>(parse_stats.max_channel_wave_bytes_1s) / 1024.0;
 
   std::cout << "\nSummary\n"
             << "  elapsed_s: " << dt << "\n"
-            << "  loops: " << stats.loops << "\n"
-            << "  packets_total: " << stats.packets << "\n"
-            << "  packets_with_data: " << stats.packets_with_data << "\n"
-            << "  bytes_total: " << stats.bytes << " (" << std::fixed << std::setprecision(2)
+            << "  loops: " << read_stats.loops << "\n"
+            << "  packets_total: " << read_stats.packets << "\n"
+            << "  packets_with_data: " << read_stats.packets_with_data << "\n"
+            << "  bytes_total: " << read_stats.bytes << " (" << std::fixed
+            << std::setprecision(2)
             << mib << " MiB)\n"
-            << "  parsed_events: " << stats.parsed_events << "\n"
-            << "  invalid_markers: " << stats.invalid_markers << "\n"
-            << "  bus_error_terminations: " << stats.bus_error_terminations << "\n"
-            << "  read_errors: " << stats.read_errors << "\n"
-            << "  event_full_seen: " << stats.event_full_seen << "\n"
-            << "  saved_packets: " << stats.saved_packets << "\n"
+            << "  parsed_events: " << parse_stats.parsed_events << "\n"
+            << "  invalid_markers: " << parse_stats.invalid_markers << "\n"
+            << "  bus_error_terminations: " << read_stats.bus_error_terminations << "\n"
+            << "  read_errors: " << read_stats.read_errors << "\n"
+            << "  event_full_seen: " << read_stats.event_full_seen << "\n"
+            << "  saved_packets: " << read_stats.saved_packets << "\n"
             << "  channel_rate_avg_runtime_per_channel_kiBps: " << std::fixed
             << std::setprecision(2) << avg_runtime_per_channel_kibps << "\n"
             << "  channel_rate_max_runtime_per_channel_kiBps: "

@@ -154,7 +154,7 @@ Header rows
 thr - threshhold
 pkts - number of packets
 MiB_s - MiB/s read from the board  
-avg_ch_kiBps - average kiBps per channel active
+avg_ch_kiBps - average kiBps per channel active form waveform
 max_ch_kiBps - max instantaneous in a channel
 invalid - number of invalid packages (causes Redax segfault)
 invalid_pct - Percentage invalid 

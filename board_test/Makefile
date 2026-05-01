@@ -1,7 +1,7 @@
 CXX ?= g++
-CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Wpedantic
+CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Wpedantic -pthread
 CPPFLAGS ?=
-LDFLAGS ?=
+LDFLAGS ?= -pthread
 LDLIBS ?= -lCAENVME
 
 # How does redax makefile even find this
