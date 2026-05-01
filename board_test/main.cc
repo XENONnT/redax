@@ -168,16 +168,36 @@ void PrintUsage(const char* argv0) {
 }
 
 bool ParseU32(const std::string& s, uint32_t* out) {
+  auto in_u32_range = [](unsigned long long v) {
+    return v <= 0xFFFFFFFFULL;
+  };
   try {
     size_t idx = 0;
     unsigned long long v = std::stoull(s, &idx, 0);
-    if (idx != s.size() || v > 0xFFFFFFFFULL) {
+    if (idx != s.size() || !in_u32_range(v)) {
       return false;
     }
     *out = static_cast<uint32_t>(v);
     return true;
   } catch (...) {
-    return false;
+    // Accept bare hex like "FFFF0000" used in some exported configs.
+    bool all_hex = !s.empty();
+    for (char c : s) {
+      if (!std::isxdigit(static_cast<unsigned char>(c))) {
+        all_hex = false;
+        break;
+      }
+    }
+    if (!all_hex) return false;
+    try {
+      size_t idx = 0;
+      unsigned long long v = std::stoull(s, &idx, 16);
+      if (idx != s.size() || !in_u32_range(v)) return false;
+      *out = static_cast<uint32_t>(v);
+      return true;
+    } catch (...) {
+      return false;
+    }
   }
 }
 
