@@ -173,7 +173,26 @@ How to read health quickly:
 - Transport/readout issue: nonzero `read_errors`, especially with low `packets_with_data`.
 - Sustained pressure: high `event_full_seen` relative to runtime can indicate board backpressure.
 
-### To share rate based crash data with caen 
+
+## Dispatcher Heartbeat Spoof
+
+If dispatcher/hypervisor must stay online, run this helper to keep one reader host "alive" in `db.status` while testing boards outside redax:
+
+```bash
+python3 board_test/spoof_reader_status.py \
+  --uri 'mongodb://daq:${MONGO_PASSWORD_DAQ}@192.168.131.1:27020/admin' \
+  --db daq \
+  --host "$(hostname)_reader_0" \
+  --detector tpc \
+  --status idle \
+  --mode board_test_cheat \
+  --comment 'CHEAT: board_test standalone run'
+```
+- Writes `detector_control` with `<detector>.active=false` continuously while running.
+- `--duration-s N`: stop automatically after `N` seconds.
+- `--sleep-s`controls write frequency defaults to 0.1 seconds
+
+## To share rate based crash data with caen 
 
 Clone a minimal config from the mongodb with `--write-merged --override-host` and run (this runs for 30 seconds)
 ```
