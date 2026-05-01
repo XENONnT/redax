@@ -1,7 +1,13 @@
 CXX ?= g++
 CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Wpedantic
+CPPFLAGS ?=
 LDFLAGS ?=
 LDLIBS ?= -lCAENVME
+
+# How does redax makefile even find this
+CAEN_PREFIX ?= /daq_common3/caen
+CPPFLAGS += -I$(CAEN_PREFIX)/include
+LDFLAGS += -L$(CAEN_PREFIX)/lib
 
 TARGET := board_stress_test
 SRC := main.cc
@@ -11,8 +17,7 @@ SRC := main.cc
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f $(TARGET)
-
