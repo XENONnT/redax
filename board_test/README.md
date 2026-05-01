@@ -101,11 +101,11 @@ Stop/recovery examples:
 
 I ran for board 79
 ```bash
-mkdir -p out
-for thr in $(seq 1 5 51); do
+mkdir -p ADC_1227
+for thr in $(seq 1 11); do
   ./board_stress_test \
     --link 0 \
-    --crate 4 \
+    --crate 0 \
     --base 0xFFFF0000 \
     --do-sn-check \
     --start-mode software \
@@ -121,13 +121,13 @@ for thr in $(seq 1 5 51); do
     --duration-s 120 \
     --status-period 500 \
     --threshold "$thr" \
-    >> "out/thresh_${thr}"
+    >> "ADC_1227/thresh_${thr}"
 done
 ```
 To make a quick table 
 ```bash
 { printf "thr\tpkts\tMiB_s\tavg_ch_kiBps\tmax_ch_kiBps\tinvalid\tinvalid_pct\tevent_full_pct\tread_err\n";
-  for f in out/thresh_*; do
+  for f in ADC_79/thresh_*; do
     thr="${f##*thresh_}";
     awk -v thr="$thr" '
       /elapsed_s:/ {elapsed=$2}
@@ -148,6 +148,55 @@ To make a quick table
       }' "$f";
   done; } | sort -n | column -t -s $'\t'
 ```
+and for docu wiki syntax
+```bash
+dokuwiki_adc_table() {
+  local adc="$1"
+  local dir="ADC_${adc}"
+
+  if [[ -z "$adc" ]]; then
+    echo "usage: dokuwiki_adc_table <ADC number>" >&2
+    return 2
+  fi
+
+  if [[ ! -d "$dir" ]]; then
+    echo "error: directory not found: $dir" >&2
+    return 1
+  fi
+
+  {
+    printf "^ ADC %s |||||||||\n" "$adc"
+    printf "^ thr ^ pkts ^ MiB_s ^ avg_ch_kiBps ^ max_ch_kiBps ^ invalid ^ invalid_pct ^ event_full_pct ^ read_err ^\n"
+
+    for f in "$dir"/thresh_*; do
+      [[ -f "$f" ]] || continue
+
+      thr="${f##*thresh_}"
+
+      awk -v thr="$thr" '
+        /elapsed_s:/ {elapsed=$2}
+        /loops:/ {loops=$2}
+        /packets_total:/ {pkts=$2}
+        /bytes_total:/ {bytes=$2}
+        /invalid_markers:/ {inv=$2}
+        /event_full_seen:/ {full=$2}
+        /read_errors:/ {re=$2}
+        /channel_rate_avg_runtime_per_channel_kiBps:/ {avg=$2}
+        /channel_rate_max_runtime_per_channel_kiBps:/ {mx=$2}
+        END {
+          mibs=(elapsed>0 ? bytes/1048576/elapsed : 0)
+          invp=(pkts>0 ? 100*inv/pkts : 0)
+          fullp=(loops>0 ? 100*full/loops : 0)
+
+          printf "| %s | %d | %.1f | %.1f | %.1f | %d | %.2f | %.2f | %d |\n",
+                 thr, pkts, mibs, avg, mx, inv, invp, fullp, re
+        }' "$f"
+    done
+  } | sort -t'|' -k2,2n
+}
+dokuwiki_adc_table 79
+```
+
 
 Header rows
 ```
