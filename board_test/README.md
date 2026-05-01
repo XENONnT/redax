@@ -99,19 +99,18 @@ Stop/recovery examples:
 
 ## Quick helper
 
-I ran 
+I ran for board 79
 ```bash
 mkdir -p out
-for thr in $(seq 21 31); do
+for thr in $(seq 1 5 51); do
   ./board_stress_test \
-    --link 3 \
-    --crate 0 \
+    --link 0 \
+    --crate 4 \
     --base 0xFFFF0000 \
-    --board-id 1390 \
     --do-sn-check \
     --start-mode software \
     --channel-mask 0xFF \
-    --fixed-dac 7000 \
+    --fixed-dac 16000 \
     --reg 0xEF1C=0xFF \
     --reg 0x8000=0x3310 \
     --reg 0x8080=0x510000 \
@@ -154,7 +153,7 @@ Header rows
 ```
 thr - threshhold
 pkts - number of packets
-MiB_s - MiB/s over the running 
+MiB_s - MiB/s read from the board  
 avg_ch_kiBps - average kiBps per channel active
 max_ch_kiBps - max instantaneous in a channel
 invalid - number of invalid packages (causes Redax segfault)
