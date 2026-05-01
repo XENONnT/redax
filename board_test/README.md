@@ -1,203 +1,164 @@
 # board_stress_test
 
-Standalone script to test a singular config on this device.
-
-See helpers/export_redax_mode.py
+Standalone single-board V1724 readout test.
 
 - No Mongo dependency
 - No Redax runtime dependency
 - Only `std` + `CAENVMElib`
+- No config loading
 - Fixed baseline DAC only (no baseline fitting)
 
 ## Build
 
 ```bash
-cd board_stress_test
+cd board_test
 make
 ```
 
-## What It Does
-
-1. Connects with `CAENVME_Init2`
-2. Optionally resets the board (`0xEF24`, `0xEF00`)
-3. Applies fixed config:
-   - channel enable mask (`0x8120`)
-   - fixed DAC per enabled channel (`0x1098 + 0x100*ch`)
-   - threshold per enabled channel (`0x1060 + 0x100*ch`)
-   - optional trigger/post-trigger registers
-   - optional extra raw register writes (`--reg REG=VAL`)
-4. Starts acquisition (`software` or `sin`)
-5. Polls acquisition status (`0x8104`) and reads BLT packets
-6. Checks packet integrity with the same event-marker rule used in formatter:
-   - marker nibble `0xA`
-   - advertised event words must be `> 0` and `<= remaining_words`
-7. Stops acquisition and prints summary
-
-## Config Loading
-
-You can load options from JSON files and mirror Redax include merging:
-
-- Pass `--config <path/to/file.json>`
-- for quick iter of baselines `--fixed-dac` overwrites the config value
-
-This mirrors Redax behavior where included docs are merged first and root/override wins.
-
-`--host` defaults to `<local_hostname>_reader_0`, this should never need adjusting assuming valid config files. 
-
-## Config vs CLI Matrix
-
-| Setting | Config key | CLI key |
-| --- | --- | --- |
-| Root config input | n/a | `--config` |
-| Config override file | n/a | `--config-override-file` |
-| Include merge | `includes` | n/a |
-| Host selector used for board/detector matching | `boards[].host`, `detectors[<host>]` | `--host` |
-| Board selection | `boards[]` (`type`, `skip`, `host`, `board`) | `--board-id` |
-| Link | `boards[].link` | `--link` |
-| Crate | `boards[].crate` | `--crate` |
-| Base address | `boards[].vme_address` | `--base` |
-| Channel mask | `channel_mask` | `--channel-mask` |
-| Fixed DAC | `baseline_fixed_value` | `--fixed-dac` |
-| Thresholds | `thresholds[<board_id>]` | `--threshold`, `--thresholds` |
-| Trigger mask | `trigger_mask` | `--trigger-mask` |
-| Post-trigger | `post_trigger` | `--post-trigger` |
-| Extra register writes | `registers[]` (`board`, `reg`, `val`) | `--reg` |
-| Start mode | `run_start` (`0=software`, nonzero=`sin`) | `--start-mode` |
-| First-trigger explicit SW control | n/a | `--mode10-explicit-start-stop` |
-| Sleep between polls | `us_between_reads` | `--sleep-us` |
-| Serial-number check | `do_sn_check` | `--do-sn-check` |
-| Reset at startup | n/a | `--no-reset` |
-| Run duration | n/a | `--duration-s` |
-| Max packets with data | n/a | `--max-packets` |
-| Status print period | n/a | `--status-period` |
-| Read buffer bytes | n/a | `--buffer-bytes` |
-| Continue on read errors | n/a | `--continue-on-read-error` |
-| Save all packets | n/a | `--save-packets` |
-| Save packet prefix | n/a | `--save-packets-prefix` |
-| Dump invalid packet prefix | n/a | `--dump-invalid-prefix` |
-
-Baseline note: `baseline_dac_mode`, `baseline_reference_run`, and cached/fit baseline logic are not used here.
-
-## Minimal Example
+## Usage
 
 ```bash
 ./board_stress_test \
-  --link 0 \
+  --link 3 \
   --crate 0 \
-  --base 0x32100000 \
-  --board-id 5 \
+  --base 0xFFFF0000 \
+  --board-id 1390 \
+  --do-sn-check \
+  --start-mode software \
   --channel-mask 0xFF \
   --fixed-dac 7000 \
-  --threshold 0xA \
-  --start-mode software \
-  --duration-s 60 \
-  --sleep-us 10 \
-  --status-period 200
+  --threshold 1 \
+  --reg 0xEF1C=0xFF \
+  --reg 0x8000=0x3310 \
+  --reg 0x8080=0x510000 \
+  --reg 0x8034=0x4 \
+  --reg 0x8038=0x19 \
+  --reg 0x8020=0x32 \
+  --reg 0x8078=0x19 \
+  --duration-s 10 \
+  --status-period 500
 ```
 
-Config-driven example:
+## Options
 
-```bash
-./board_stress_test \
-  --config ./example_configs/single_board_debug.json \
-  --host reader8_reader_0 \
-  --duration-s 120 \
-  --dump-invalid-prefix ./invalid
-```
+Required:
 
-## Reproducing Redax-Like Debug Settings
+- `--link <int>`
+- `--crate <int>`
+- `--base <hex|dec>`
 
-Some testing knobs
+Board setup:
 
-- `--channel-mask`: explicit channel enable/disable write (`0x8120`)
-- `--fixed-dac`: fixed DAC (replaces all baseline modes)
-- `--threshold` or `--thresholds`: trigger threshold setup
-- `--reg REG=VAL` (repeat): copy register writes from your current options
-- `--trigger-mask` / `--post-trigger`: convenience fields for common registers
+- `--board-id <int>`: logging only.
+- `--channel-mask <hex|dec>`: writes `0x8120`.
+- `--fixed-dac <hex|dec>`: writes channel DACs (`0x1098 + 0x100*ch`).
+- `--threshold <hex|dec>`: same threshold on all channels.
+- `--thresholds a,b,c,d,e,f,g,h`: per-channel thresholds.
+- `--trigger-mask <hex|dec>`: writes `0x810C`.
+- `--post-trigger <hex|dec>`: writes `0x8114`.
+- `--reg REG=VAL`: extra register write(s).
+- `--no-reset`: skip startup reset.
+- `--do-sn-check`: read and print serial from `0xF084/0xF080`.
+
+Run control:
+
 - `--start-mode software|sin`
-- `--mode10-explicit-start-stop`: force `AQ_CTRL` mode bits `[1:0]=10`, write `0x106` to arm/start mode, force-enable SW trigger source bit (`0x810C[31]`), issue two software trigger pulses (`0x8108=0x1` x2: first to start, second to request first event), and stop via `0x102`.
-- `--buffer-bytes`, `--sleep-us`: readout behavior
+- `--mode10-explicit-start-stop`
+- `--stop-only`: open board, issue `0x8100=0x100`, wait for run bit clear, exit.
+- `--duration-s <float>`
+- `--max-packets <int>`
+- `--sleep-us <int>`
+- `--buffer-bytes <int>`
+- `--status-period <int>`
+- `--continue-on-read-error`
+- `--save-packets`
+- `--save-packets-prefix <prefix>`
+- `--dump-invalid-prefix <prefix>`
 
-## Useful Debug Flags
-
-- `--do-sn-check`: prints SN from `0xF084/0xF080`
-- `--dump-invalid-prefix <prefix>`: dumps malformed packets to `<prefix>_packet_N.bin`
-- `--save-packets`: save all non-empty packets (default is OFF)
-- `--save-packets-prefix <prefix>`: change packet dump prefix (default `packet`)
-- `--continue-on-read-error`: keep running after CAEN read errors
-
-## Final Summary Interpretation
-
-The tool prints:
-
-```text
-Summary
-  elapsed_s: ...
-  loops: ...
-  packets_total: ...
-  packets_with_data: ...
-  bytes_total: ... (... MiB)
-  parsed_events: ...
-  invalid_markers: ...
-  bus_error_terminations: ...
-  read_errors: ...
-  event_full_seen: ...
-  saved_packets: ...
-  channel_rate_avg_runtime_per_channel_kiBps: ...
-  channel_rate_max_runtime_per_channel_kiBps: ...
-  channel_rate_avg_1s_over_time_channels_kiB: ...
-  channel_rate_max_1s_any_channel_kiB: ...
-```
-
-Field meaning:
-
-- `elapsed_s`: actual runtime from acquisition start to stop.
-- `loops`: status-poll/readout loop iterations.
-- `packets_total`: number of read cycles that completed (`cvSuccess` or `cvBusError` termination).
-- `packets_with_data`: packets where `total_bytes > 0`.
-- `bytes_total`: total bytes received in non-empty packets.
-- `parsed_events`: count of event headers found with marker nibble `0xA` and valid advertised length.
-- `invalid_markers`: packets where an event header was malformed (`ev_words == 0` or `ev_words > remaining_words`).
-- `bus_error_terminations`: read cycles terminated by `cvBusError` (often expected end-of-block behavior in this flow).
-- `read_errors`: non-bus read failures and overflow guards.
-- `event_full_seen`: number of status polls where acquisition status had `EVENT_FULL` bit set.
-- `saved_packets`: number of packet files written by `--save-packets*`.
-- `channel_rate_avg_runtime_per_channel_kiBps`: average waveform payload rate per enabled channel over full runtime.
-- `channel_rate_max_runtime_per_channel_kiBps`: highest runtime-average waveform payload rate among channels.
-- `channel_rate_avg_1s_over_time_channels_kiB`: average per-channel payload in each full 1 s window (same 1 s cadence concept as redax status updates).
-- `channel_rate_max_1s_any_channel_kiB`: largest per-channel payload observed in any full 1 s window.
-- “enabled channel” count uses `channel_mask` only when this tool applied it; otherwise defaults to 8 channels.
-
-How to read health quickly:
-
-- Good/expected: `read_errors=0`, `invalid_markers=0`, `packets_with_data>0`.
-- Data-shape issue: rising `invalid_markers` while `read_errors` stays low.
-- Transport/readout issue: nonzero `read_errors`, especially with low `packets_with_data`.
-- Sustained pressure: high `event_full_seen` relative to runtime can indicate board backpressure.
-
-
-## Dispatcher Heartbeat Spoof
-
-If dispatcher/hypervisor must stay online, run this helper to keep one reader host "alive" in `db.status` while testing boards outside redax:
+Stop/recovery examples:
 
 ```bash
-python3 board_test/spoof_reader_status.py \
-  --uri "mongodb://daq:${MONGO_PASSWORD_DAQ}@192.168.131.1:27020/admin" \
-  --db daq \
-  --host "$(hostname)_reader_0" \
-  --detector tpc \
-  --status idle \
-  --mode board_test_cheat \
-  --comment 'CHEAT: board_test standalone run'
-```
-- Writes `detector_control` with `<detector>.active=false` continuously while running.
-- `--duration-s N`: stop automatically after `N` seconds.
-- `--sleep-s`controls write frequency defaults to 0.1 seconds
+# Stop only
+./board_stress_test --link 3 --crate 0 --base 0xFFFF0000 --stop-only
 
-## To share rate based crash data with caen 
+# Stop plus startup reset (default includes reset unless --no-reset is passed)
+./board_stress_test --link 3 --crate 0 --base 0xFFFF0000 --stop-only --do-sn-check
+```
 
-Clone a minimal config from the mongodb with `--write-merged --override-host` and run (this runs for 30 seconds)
+## Summary fields
+
+- `packets_total`: completed read cycles (`cvSuccess`/`cvBusError`).
+- `packets_with_data`: non-empty packets.
+- `parsed_events`: count of valid `0xA` event headers.
+- `invalid_markers`: malformed event headers.
+- `bus_error_terminations`: read cycles ended by `cvBusError`.
+- `read_errors`: non-bus read failures and overflow guards.
+- `event_full_seen`: number of polls with status `EVENT_FULL`.
+- `channel_rate_*`: waveform payload rates per channel.
+
+
+## Quick helper
+
+I ran 
+```bash
+mkdir -p out
+for thr in $(seq 21 31); do
+  ./board_stress_test \
+    --link 3 \
+    --crate 0 \
+    --base 0xFFFF0000 \
+    --board-id 1390 \
+    --do-sn-check \
+    --start-mode software \
+    --channel-mask 0xFF \
+    --fixed-dac 7000 \
+    --reg 0xEF1C=0xFF \
+    --reg 0x8000=0x3310 \
+    --reg 0x8080=0x510000 \
+    --reg 0x8034=0x4 \
+    --reg 0x8038=0x19 \
+    --reg 0x8020=0x32 \
+    --reg 0x8078=0x19 \
+    --duration-s 120 \
+    --status-period 500 \
+    --threshold "$thr" \
+    >> "out/thresh_${thr}"
+done
 ```
-./board_stress_test --config ./config_from_mongo/<MODE_NAME>.json
+To make a quick table 
+```bash
+{ printf "thr\tpkts\tMiB_s\tavg_ch_kiBps\tmax_ch_kiBps\tinvalid\tinvalid_pct\tevent_full_pct\tread_err\n";
+  for f in out/thresh_*; do
+    thr="${f##*thresh_}";
+    awk -v thr="$thr" '
+      /elapsed_s:/ {elapsed=$2}
+      /loops:/ {loops=$2}
+      /packets_total:/ {pkts=$2}
+      /bytes_total:/ {bytes=$2}
+      /invalid_markers:/ {inv=$2}
+      /event_full_seen:/ {full=$2}
+      /read_errors:/ {re=$2}
+      /channel_rate_avg_runtime_per_channel_kiBps:/ {avg=$2}
+      /channel_rate_max_runtime_per_channel_kiBps:/ {mx=$2}
+      END{
+        mibs=(elapsed>0?bytes/1048576/elapsed:0);
+        invp=(pkts>0?100*inv/pkts:0);
+        fullp=(loops>0?100*full/loops:0);
+        printf "%s\t%d\t%.1f\t%.1f\t%.1f\t%d\t%.2f\t%.2f\t%d\n",
+               thr, pkts, mibs, avg, mx, inv, invp, fullp, re;
+      }' "$f";
+  done; } | sort -n | column -t -s $'\t'
 ```
-This produces some information on failure rate under the configuration. Such that they can attempt to replicate what we get. 
+
+Header rows
+```
+thr - threshhold
+pkts - number of packets
+MiB_s - MiB/s over the running 
+avg_ch_kiBps - average kiBps per channel active
+max_ch_kiBps - max instantaneous in a channel
+invalid - number of invalid packages (causes Redax segfault)
+invalid_pct - Percentage invalid 
+event_full_pct - Percentage of events with EVENT_Full bit
+read_err - actual read errors reported
+```
