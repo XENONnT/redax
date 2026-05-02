@@ -87,7 +87,10 @@ struct Stats {
   int64_t saved_packets = 0;
   int64_t header_events = 0;
   int64_t header_invalid_packets = 0;
-  int64_t header_word1_inconsistent = 0;
+  int64_t header_word1_board_id_inconsistent = 0;
+  int64_t header_word1_reserved_inconsistent = 0;
+  int64_t header_word1_pattern_inconsistent = 0;
+  int64_t header_word1_channel_mask_inconsistent = 0;
   int64_t header_fail_flag_events = 0;
   int64_t header_counter_jump_events = 0;
   int64_t header_inferred_missing_events = 0;
@@ -119,7 +122,10 @@ struct PacketWork {
 
 struct HeaderState {
   bool have_word1_reference = false;
-  uint32_t word1_reference_no_fail = 0;
+  uint32_t word1_board_id_ref = 0;
+  uint32_t word1_reserved_ref = 0;
+  uint32_t word1_pattern_ref = 0;
+  uint32_t word1_channel_mask_ref = 0;
   bool have_counter = false;
   uint32_t previous_counter = 0;
   bool have_time_tag = false;
@@ -133,7 +139,10 @@ struct HeaderCheck {
   uint32_t advertised_words = 0;
   size_t bad_index = 0;
   size_t remaining_words = 0;
-  int64_t word1_inconsistent = 0;
+  int64_t word1_board_id_inconsistent = 0;
+  int64_t word1_reserved_inconsistent = 0;
+  int64_t word1_pattern_inconsistent = 0;
+  int64_t word1_channel_mask_inconsistent = 0;
   int64_t fail_flag_events = 0;
   int64_t counter_jump_events = 0;
   int64_t inferred_missing_events = 0;
@@ -142,8 +151,14 @@ struct HeaderCheck {
   int64_t time_backwards = 0;
   int64_t time_repeats = 0;
   bool have_word1_sample = false;
-  uint32_t word1_reference_sample = 0;
-  uint32_t word1_seen_sample = 0;
+  uint32_t word1_board_id_ref_sample = 0;
+  uint32_t word1_board_id_seen_sample = 0;
+  uint32_t word1_reserved_ref_sample = 0;
+  uint32_t word1_reserved_seen_sample = 0;
+  uint32_t word1_pattern_ref_sample = 0;
+  uint32_t word1_pattern_seen_sample = 0;
+  uint32_t word1_channel_mask_ref_sample = 0;
+  uint32_t word1_channel_mask_seen_sample = 0;
   bool have_counter_jump_sample = false;
   uint32_t counter_prev_sample = 0;
   uint32_t counter_now_sample = 0;
@@ -485,22 +500,46 @@ HeaderCheck AnalyzeHeaders(const uint32_t* words, size_t n_words, HeaderState* s
     const uint32_t w1 = words[i + 1];
     const uint32_t w2 = words[i + 2];
     const uint32_t w3 = words[i + 3];
-    const uint32_t w1_no_fail = w1 & ~(1U << 26U);
+    const uint32_t w1_board_id = (w1 >> 27U) & 0x1FU;
+    const uint32_t w1_reserved = (w1 >> 24U) & 0x3U;
+    const uint32_t w1_pattern = (w1 >> 8U) & 0xFFFFU;
+    const uint32_t w1_channel_mask = w1 & 0xFFU;
 
     out.events++;
 
     if (state->have_word1_reference) {
-      if (w1_no_fail != state->word1_reference_no_fail) {
-        out.word1_inconsistent++;
+      if (w1_board_id != state->word1_board_id_ref) {
+        out.word1_board_id_inconsistent++;
+      }
+      if (w1_reserved != state->word1_reserved_ref) {
+        out.word1_reserved_inconsistent++;
+      }
+      if (w1_pattern != state->word1_pattern_ref) {
+        out.word1_pattern_inconsistent++;
+      }
+      if (w1_channel_mask != state->word1_channel_mask_ref) {
+        out.word1_channel_mask_inconsistent++;
+      }
+      if (out.word1_board_id_inconsistent > 0 || out.word1_reserved_inconsistent > 0 ||
+          out.word1_pattern_inconsistent > 0 || out.word1_channel_mask_inconsistent > 0) {
         if (!out.have_word1_sample) {
           out.have_word1_sample = true;
-          out.word1_reference_sample = state->word1_reference_no_fail;
-          out.word1_seen_sample = w1_no_fail;
+          out.word1_board_id_ref_sample = state->word1_board_id_ref;
+          out.word1_board_id_seen_sample = w1_board_id;
+          out.word1_reserved_ref_sample = state->word1_reserved_ref;
+          out.word1_reserved_seen_sample = w1_reserved;
+          out.word1_pattern_ref_sample = state->word1_pattern_ref;
+          out.word1_pattern_seen_sample = w1_pattern;
+          out.word1_channel_mask_ref_sample = state->word1_channel_mask_ref;
+          out.word1_channel_mask_seen_sample = w1_channel_mask;
         }
       }
     } else {
       state->have_word1_reference = true;
-      state->word1_reference_no_fail = w1_no_fail;
+      state->word1_board_id_ref = w1_board_id;
+      state->word1_reserved_ref = w1_reserved;
+      state->word1_pattern_ref = w1_pattern;
+      state->word1_channel_mask_ref = w1_channel_mask;
     }
 
     if ((w1 >> 26U) & 0x1U) {
@@ -831,7 +870,11 @@ int main(int argc, char** argv) {
       HeaderCheck hcheck = AnalyzeHeaders(words, n_words, &header_state);
       parse_stats.parsed_events += hcheck.events;
       parse_stats.header_events += hcheck.events;
-      parse_stats.header_word1_inconsistent += hcheck.word1_inconsistent;
+      parse_stats.header_word1_board_id_inconsistent += hcheck.word1_board_id_inconsistent;
+      parse_stats.header_word1_reserved_inconsistent += hcheck.word1_reserved_inconsistent;
+      parse_stats.header_word1_pattern_inconsistent += hcheck.word1_pattern_inconsistent;
+      parse_stats.header_word1_channel_mask_inconsistent +=
+          hcheck.word1_channel_mask_inconsistent;
       parse_stats.header_fail_flag_events += hcheck.fail_flag_events;
       parse_stats.header_counter_jump_events += hcheck.counter_jump_events;
       parse_stats.header_inferred_missing_events += hcheck.inferred_missing_events;
@@ -849,14 +892,18 @@ int main(int argc, char** argv) {
                   << " word0=0x" << std::hex << hcheck.bad_word << std::dec << "\n";
       }
 
-      if (hcheck.word1_inconsistent > 0 || hcheck.counter_jump_events > 0 ||
-          hcheck.counter_backwards > 0 || hcheck.time_backwards > 0 ||
-          hcheck.fail_flag_events > 0 || hcheck.counter_repeats > 0 ||
-          hcheck.time_repeats > 0) {
+      if (hcheck.word1_board_id_inconsistent > 0 || hcheck.word1_reserved_inconsistent > 0 ||
+          hcheck.word1_pattern_inconsistent > 0 || hcheck.word1_channel_mask_inconsistent > 0 ||
+          hcheck.counter_jump_events > 0 || hcheck.counter_backwards > 0 ||
+          hcheck.time_backwards > 0 || hcheck.fail_flag_events > 0 ||
+          hcheck.counter_repeats > 0 || hcheck.time_repeats > 0) {
         std::cerr << "header-anomaly packet=" << work.packet_id
                   << " events=" << hcheck.events
                   << " fail=" << hcheck.fail_flag_events
-                  << " word1_changed=" << hcheck.word1_inconsistent
+                  << " word1_board_id_changed=" << hcheck.word1_board_id_inconsistent
+                  << " word1_reserved_changed=" << hcheck.word1_reserved_inconsistent
+                  << " word1_pattern_changed=" << hcheck.word1_pattern_inconsistent
+                  << " word1_chmask_changed=" << hcheck.word1_channel_mask_inconsistent
                   << " counter_jumps=" << hcheck.counter_jump_events
                   << " inferred_missing=" << hcheck.inferred_missing_events
                   << " counter_backwards=" << hcheck.counter_backwards
@@ -864,8 +911,14 @@ int main(int argc, char** argv) {
                   << " time_backwards=" << hcheck.time_backwards
                   << " time_repeats=" << hcheck.time_repeats;
         if (hcheck.have_word1_sample) {
-          std::cerr << " word1_ref=0x" << std::hex << hcheck.word1_reference_sample
-                    << " word1_seen=0x" << hcheck.word1_seen_sample << std::dec;
+          std::cerr << " w1_ref{geo=" << hcheck.word1_board_id_ref_sample
+                    << ",res=" << hcheck.word1_reserved_ref_sample
+                    << ",pat=0x" << std::hex << hcheck.word1_pattern_ref_sample
+                    << ",mask=0x" << hcheck.word1_channel_mask_ref_sample << std::dec << "}"
+                    << " w1_seen{geo=" << hcheck.word1_board_id_seen_sample
+                    << ",res=" << hcheck.word1_reserved_seen_sample
+                    << ",pat=0x" << std::hex << hcheck.word1_pattern_seen_sample
+                    << ",mask=0x" << hcheck.word1_channel_mask_seen_sample << std::dec << "}";
         }
         if (hcheck.have_counter_jump_sample) {
           std::cerr << " counter_prev=" << hcheck.counter_prev_sample
@@ -1086,7 +1139,14 @@ int main(int argc, char** argv) {
             << "  invalid_markers: " << parse_stats.invalid_markers << "\n"
             << "  header_events_checked: " << parse_stats.header_events << "\n"
             << "  header_invalid_packets: " << parse_stats.header_invalid_packets << "\n"
-            << "  header_word1_inconsistent: " << parse_stats.header_word1_inconsistent << "\n"
+            << "  header_word1_board_id_inconsistent: "
+            << parse_stats.header_word1_board_id_inconsistent << "\n"
+            << "  header_word1_reserved_inconsistent: "
+            << parse_stats.header_word1_reserved_inconsistent << "\n"
+            << "  header_word1_pattern_inconsistent: "
+            << parse_stats.header_word1_pattern_inconsistent << "\n"
+            << "  header_word1_channel_mask_inconsistent: "
+            << parse_stats.header_word1_channel_mask_inconsistent << "\n"
             << "  header_fail_flag_events: " << parse_stats.header_fail_flag_events << "\n"
             << "  header_counter_jump_events: " << parse_stats.header_counter_jump_events << "\n"
             << "  header_inferred_missing_events: "
