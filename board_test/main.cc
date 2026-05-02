@@ -85,6 +85,16 @@ struct Stats {
   int64_t parsed_events = 0;
   int64_t event_full_seen = 0;
   int64_t saved_packets = 0;
+  int64_t header_events = 0;
+  int64_t header_invalid_packets = 0;
+  int64_t header_word1_inconsistent = 0;
+  int64_t header_fail_flag_events = 0;
+  int64_t header_counter_jump_events = 0;
+  int64_t header_inferred_missing_events = 0;
+  int64_t header_counter_backwards = 0;
+  int64_t header_counter_repeats = 0;
+  int64_t header_time_backwards = 0;
+  int64_t header_time_repeats = 0;
 
   std::array<int64_t, 8> channel_wave_bytes_total{};
   int64_t rate_windows_1s = 0;
@@ -105,6 +115,44 @@ struct PacketWork {
   int64_t packet_id = 0;
   int64_t nbytes = 0;
   std::vector<uint8_t> data;
+};
+
+struct HeaderState {
+  bool have_word1_reference = false;
+  uint32_t word1_reference_no_fail = 0;
+  bool have_counter = false;
+  uint32_t previous_counter = 0;
+  bool have_time_tag = false;
+  uint32_t previous_time_tag = 0;
+};
+
+struct HeaderCheck {
+  int events = 0;
+  bool invalid = false;
+  uint32_t bad_word = 0;
+  uint32_t advertised_words = 0;
+  size_t bad_index = 0;
+  size_t remaining_words = 0;
+  int64_t word1_inconsistent = 0;
+  int64_t fail_flag_events = 0;
+  int64_t counter_jump_events = 0;
+  int64_t inferred_missing_events = 0;
+  int64_t counter_backwards = 0;
+  int64_t counter_repeats = 0;
+  int64_t time_backwards = 0;
+  int64_t time_repeats = 0;
+  bool have_word1_sample = false;
+  uint32_t word1_reference_sample = 0;
+  uint32_t word1_seen_sample = 0;
+  bool have_counter_jump_sample = false;
+  uint32_t counter_prev_sample = 0;
+  uint32_t counter_now_sample = 0;
+  bool have_counter_backwards_sample = false;
+  uint32_t counter_prev_backwards_sample = 0;
+  uint32_t counter_now_backwards_sample = 0;
+  bool have_time_backwards_sample = false;
+  uint32_t time_prev_sample = 0;
+  uint32_t time_now_sample = 0;
 };
 
 void PrintUsage(const char* argv0) {
@@ -413,6 +461,98 @@ PacketCheck CheckPacket(const uint32_t* words, size_t n_words) {
   return out;
 }
 
+HeaderCheck AnalyzeHeaders(const uint32_t* words, size_t n_words, HeaderState* state) {
+  HeaderCheck out;
+  size_t i = 0;
+  while (i < n_words) {
+    const uint32_t w0 = words[i];
+    if ((w0 >> 28U) != 0xAU) {
+      ++i;
+      continue;
+    }
+
+    const uint32_t ev_words = w0 & 0x0FFFFFFFU;
+    const size_t remaining = n_words - i;
+    if (ev_words == 0U || ev_words > remaining || ev_words < 4U) {
+      out.invalid = true;
+      out.bad_word = w0;
+      out.advertised_words = ev_words;
+      out.bad_index = i;
+      out.remaining_words = remaining;
+      break;
+    }
+
+    const uint32_t w1 = words[i + 1];
+    const uint32_t w2 = words[i + 2];
+    const uint32_t w3 = words[i + 3];
+    const uint32_t w1_no_fail = w1 & ~(1U << 26U);
+
+    out.events++;
+
+    if (state->have_word1_reference) {
+      if (w1_no_fail != state->word1_reference_no_fail) {
+        out.word1_inconsistent++;
+        if (!out.have_word1_sample) {
+          out.have_word1_sample = true;
+          out.word1_reference_sample = state->word1_reference_no_fail;
+          out.word1_seen_sample = w1_no_fail;
+        }
+      }
+    } else {
+      state->have_word1_reference = true;
+      state->word1_reference_no_fail = w1_no_fail;
+    }
+
+    if ((w1 >> 26U) & 0x1U) {
+      out.fail_flag_events++;
+    }
+
+    if (state->have_counter) {
+      const uint32_t delta = w2 - state->previous_counter;
+      if (delta == 0U) {
+        out.counter_repeats++;
+      } else if (delta == 1U) {
+      } else if (delta < 0x80000000U) {
+        out.counter_jump_events++;
+        out.inferred_missing_events += static_cast<int64_t>(delta - 1U);
+        if (!out.have_counter_jump_sample) {
+          out.have_counter_jump_sample = true;
+          out.counter_prev_sample = state->previous_counter;
+          out.counter_now_sample = w2;
+        }
+      } else {
+        out.counter_backwards++;
+        if (!out.have_counter_backwards_sample) {
+          out.have_counter_backwards_sample = true;
+          out.counter_prev_backwards_sample = state->previous_counter;
+          out.counter_now_backwards_sample = w2;
+        }
+      }
+    }
+    state->have_counter = true;
+    state->previous_counter = w2;
+
+    if (state->have_time_tag) {
+      const uint32_t delta = w3 - state->previous_time_tag;
+      if (delta == 0U) {
+        out.time_repeats++;
+      } else if (delta > 0x80000000U) {
+        out.time_backwards++;
+        if (!out.have_time_backwards_sample) {
+          out.have_time_backwards_sample = true;
+          out.time_prev_sample = state->previous_time_tag;
+          out.time_now_sample = w3;
+        }
+      }
+    }
+    state->have_time_tag = true;
+    state->previous_time_tag = w3;
+
+    i += ev_words;
+  }
+  return out;
+}
+
 bool ParseChannelWaveBytesV1724(const uint32_t* words, size_t n_words,
                                 std::array<int64_t, 8>* out_bytes) {
   size_t i = 0;
@@ -651,6 +791,7 @@ int main(int argc, char** argv) {
   std::condition_variable queue_not_full;
   constexpr size_t kMaxQueuedPackets = 64;
   bool reader_done = false;
+  HeaderState header_state;
   auto t0 = std::chrono::steady_clock::now();
   auto t_end = t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(opt.duration_s));
@@ -687,8 +828,61 @@ int main(int argc, char** argv) {
 
       const size_t n_words = static_cast<size_t>(work.nbytes / 4);
       const auto* words = reinterpret_cast<const uint32_t*>(work.data.data());
+      HeaderCheck hcheck = AnalyzeHeaders(words, n_words, &header_state);
+      parse_stats.parsed_events += hcheck.events;
+      parse_stats.header_events += hcheck.events;
+      parse_stats.header_word1_inconsistent += hcheck.word1_inconsistent;
+      parse_stats.header_fail_flag_events += hcheck.fail_flag_events;
+      parse_stats.header_counter_jump_events += hcheck.counter_jump_events;
+      parse_stats.header_inferred_missing_events += hcheck.inferred_missing_events;
+      parse_stats.header_counter_backwards += hcheck.counter_backwards;
+      parse_stats.header_counter_repeats += hcheck.counter_repeats;
+      parse_stats.header_time_backwards += hcheck.time_backwards;
+      parse_stats.header_time_repeats += hcheck.time_repeats;
+
+      if (hcheck.invalid) {
+        parse_stats.header_invalid_packets++;
+        std::cerr << "invalid event header packet=" << work.packet_id
+                  << " idx=" << hcheck.bad_index
+                  << " advertised_words=" << hcheck.advertised_words
+                  << " remaining_words=" << hcheck.remaining_words
+                  << " word0=0x" << std::hex << hcheck.bad_word << std::dec << "\n";
+      }
+
+      if (hcheck.word1_inconsistent > 0 || hcheck.counter_jump_events > 0 ||
+          hcheck.counter_backwards > 0 || hcheck.time_backwards > 0 ||
+          hcheck.fail_flag_events > 0 || hcheck.counter_repeats > 0 ||
+          hcheck.time_repeats > 0) {
+        std::cerr << "header-anomaly packet=" << work.packet_id
+                  << " events=" << hcheck.events
+                  << " fail=" << hcheck.fail_flag_events
+                  << " word1_changed=" << hcheck.word1_inconsistent
+                  << " counter_jumps=" << hcheck.counter_jump_events
+                  << " inferred_missing=" << hcheck.inferred_missing_events
+                  << " counter_backwards=" << hcheck.counter_backwards
+                  << " counter_repeats=" << hcheck.counter_repeats
+                  << " time_backwards=" << hcheck.time_backwards
+                  << " time_repeats=" << hcheck.time_repeats;
+        if (hcheck.have_word1_sample) {
+          std::cerr << " word1_ref=0x" << std::hex << hcheck.word1_reference_sample
+                    << " word1_seen=0x" << hcheck.word1_seen_sample << std::dec;
+        }
+        if (hcheck.have_counter_jump_sample) {
+          std::cerr << " counter_prev=" << hcheck.counter_prev_sample
+                    << " counter_now=" << hcheck.counter_now_sample;
+        }
+        if (hcheck.have_counter_backwards_sample) {
+          std::cerr << " counter_prev_back=" << hcheck.counter_prev_backwards_sample
+                    << " counter_now_back=" << hcheck.counter_now_backwards_sample;
+        }
+        if (hcheck.have_time_backwards_sample) {
+          std::cerr << " time_prev=" << hcheck.time_prev_sample
+                    << " time_now=" << hcheck.time_now_sample;
+        }
+        std::cerr << "\n";
+      }
+
       PacketCheck check = CheckPacket(words, n_words);
-      parse_stats.parsed_events += check.events;
 
       std::array<int64_t, 8> packet_ch_wave_bytes{};
       bool parsed_channels = ParseChannelWaveBytesV1724(words, n_words, &packet_ch_wave_bytes);
@@ -890,6 +1084,17 @@ int main(int argc, char** argv) {
             << mib << " MiB)\n"
             << "  parsed_events: " << parse_stats.parsed_events << "\n"
             << "  invalid_markers: " << parse_stats.invalid_markers << "\n"
+            << "  header_events_checked: " << parse_stats.header_events << "\n"
+            << "  header_invalid_packets: " << parse_stats.header_invalid_packets << "\n"
+            << "  header_word1_inconsistent: " << parse_stats.header_word1_inconsistent << "\n"
+            << "  header_fail_flag_events: " << parse_stats.header_fail_flag_events << "\n"
+            << "  header_counter_jump_events: " << parse_stats.header_counter_jump_events << "\n"
+            << "  header_inferred_missing_events: "
+            << parse_stats.header_inferred_missing_events << "\n"
+            << "  header_counter_backwards: " << parse_stats.header_counter_backwards << "\n"
+            << "  header_counter_repeats: " << parse_stats.header_counter_repeats << "\n"
+            << "  header_time_backwards: " << parse_stats.header_time_backwards << "\n"
+            << "  header_time_repeats: " << parse_stats.header_time_repeats << "\n"
             << "  bus_error_terminations: " << read_stats.bus_error_terminations << "\n"
             << "  read_errors: " << read_stats.read_errors << "\n"
             << "  event_full_seen: " << read_stats.event_full_seen << "\n"
