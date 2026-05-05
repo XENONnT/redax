@@ -67,7 +67,7 @@ private:
   int ProcessEvent(std::u32string_view, const std::unique_ptr<data_packet>&,
       std::map<int, int>&);
   int ProcessChannel(std::u32string_view, int, int, uint32_t, int&, int,
-      const std::unique_ptr<data_packet>&, std::map<int, int>&);
+      const std::unique_ptr<data_packet>&, std::map<int, int>&, std::vector<std::string>&);
   void WriteOutChunk(int);
   void WriteOutChunks();
   void End();

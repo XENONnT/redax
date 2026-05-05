@@ -155,14 +155,28 @@ void StraxFormatter::GenerateArtificialDeadtime(int64_t timestamp, const std::sh
 
 void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
   // Take a buffer and break it up into one document per channel
+  if (dp->buff.empty()) return;
   auto it = dp->buff.begin();
   int evs_this_dp(0), words(0);
   bool missed = false;
   std::map<int, int> dpc;
-  do {
+  while (it < dp->buff.end() && fActive == true) {
     if((*it)>>28 == 0xA){
-      missed = true; // it works out
+      // Candidate event header. Validate that it doesn't take us out of bounds
+      // before constructing a string_view (which would be UB).
       words = (*it)&0xFFFFFFF;
+      const size_t remaining_words = static_cast<size_t>(dp->buff.end() - it);
+      if (words < event_header_words || static_cast<size_t>(words) > remaining_words) {
+        fLog->Entry(MongoLog::Warning,
+            "Skipped an event from %i due to corrupt header at idx %zx/%zx: words=%i remaining=%zu (%x)",
+            dp->digi->bid(), static_cast<size_t>(std::distance(dp->buff.begin(), it)), dp->buff.size(),
+            words, remaining_words, static_cast<unsigned int>(*it));
+        missed = false;
+        it++;
+        continue;
+      }
+
+      missed = true; // it works out
       std::u32string_view sv(dp->buff.data() + std::distance(dp->buff.begin(), it), words);
       // std::u32string_view sv(it, it+words); //c++20 :(
       ProcessEvent(sv, dp, dpc);
@@ -170,8 +184,9 @@ void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
       it += words;
     } else {
       if (missed) {
-        fLog->Entry(MongoLog::Warning, "Missed an event from %i at idx %x/%x (%x)",
-            dp->digi->bid(), std::distance(dp->buff.begin(), it), dp->buff.size(), *it);
+        fLog->Entry(MongoLog::Warning, "Missed an event from %i at idx %zx/%zx (%x)",
+            dp->digi->bid(), static_cast<size_t>(std::distance(dp->buff.begin(), it)), dp->buff.size(),
+            static_cast<unsigned int>(*it));
         missed = false;
         // this happens quite rarely, the chance of overwriting ourselves is vanishing
         // but it's nice to be able to know why we missed an event
@@ -182,7 +197,7 @@ void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
       }
       it++;
     }
-  } while (it < dp->buff.end() && fActive == true);
+  }
   fBytesProcessed += dp->buff.size()*sizeof(char32_t);
   fEvPerDP[evs_this_dp]++;
   {
@@ -209,21 +224,43 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
   buff.remove_prefix(event_header_words);
   int ret;
   int frags(0);
+  bool ok = true;
+  std::vector<std::string> fragments;
+  std::map<int, int> dpc_event;
   unsigned n_chan = dp->digi->GetNumChannels();
 
   for(unsigned ch=0; ch<n_chan; ch++){
     if (channel_mask & (1<<ch)) {
-      ret = ProcessChannel(buff, words, channel_mask, event_time, frags, ch, dp, dpc);
+      if (buff.size() < 2) {
+        fLog->Entry(MongoLog::Warning,
+            "Skipped an event from %i due to truncated channel data (event_words=%i ch_mask=%x)",
+            dp->digi->bid(), words, static_cast<unsigned int>(channel_mask));
+        ok = false;
+        break;
+      }
+      ret = ProcessChannel(buff, words, channel_mask, event_time, frags, ch, dp, dpc_event, fragments);
+      if (ret <= 0 || static_cast<size_t>(ret) > buff.size()) {
+        fLog->Entry(MongoLog::Warning,
+            "Skipped an event from %i due to corrupt channel header (event_words=%i ch_mask=%x ch=%i ch_words=%i remaining=%zu)",
+            dp->digi->bid(), words, static_cast<unsigned int>(channel_mask), ch, ret, buff.size());
+        ok = false;
+        break;
+      }
       buff.remove_prefix(ret);
     }
   }
-  fFragsPerEvent[frags]++;
+  if (ok) {
+    for (auto& fragment : fragments)
+      AddFragmentToBuffer(std::move(fragment), event_time, dp->clock_counter);
+    for (auto& p : dpc_event) dpc[p.first] += p.second;
+    fFragsPerEvent[frags]++;
+  }
   return words;
 }
 
 int StraxFormatter::ProcessChannel(std::u32string_view buff, int words_in_event,
     int channel_mask, uint32_t event_time, int& frags, int channel,
-    const std::unique_ptr<data_packet>& dp, std::map<int, int>& dpc) {
+    const std::unique_ptr<data_packet>& dp, std::map<int, int>& dpc, std::vector<std::string>& fragments) {
   // buff points to the first word of the channel's data
 
   int n_channels = std::bitset<max_channels>(channel_mask).count();
@@ -268,7 +305,7 @@ int StraxFormatter::ProcessChannel(std::u32string_view buff, int words_in_event,
     for (; samples_this_frag < samples_per_frag; samples_this_frag++)
       fragment.append((char*)&zero_filler, sizeof(zero_filler));
 
-    AddFragmentToBuffer(std::move(fragment), event_time, dp->clock_counter);
+    fragments.emplace_back(std::move(fragment));
   } // loop over frag_i
   dpc[global_ch] += samples_in_pulse*sizeof(uint16_t);
   return channel_words;
@@ -487,4 +524,3 @@ std::vector<std::string> StraxFormatter::GetChunkNames(int chunk) {
     GetStringFormat(chunk+1)+"_pre"}};
   return ret;
 }
-

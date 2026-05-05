@@ -147,6 +147,13 @@ class MongoConnect(object):
         self.command_thread = threading.Thread(target=self.process_commands)
         self.command_thread.start()
 
+        # Cursor for monitoring reader logs for issues that should be written to
+        # the runs database (run-level flags).
+        self._reader_log_cursor = None
+        self._runs_flagged_missed_event = set()
+        self._runs_flagged_skipped_events = set()
+        self._init_reader_log_cursor()
+
     def quit(self):
         self.run = False
         try:
@@ -189,6 +196,113 @@ class MongoConnect(object):
                 self.should_backup_aggstat = False
         else:
             self.should_backup_aggstat = today.day != 1
+
+    def _init_reader_log_cursor(self):
+        """
+        Initializes the reader-log cursor so we only scan new log messages.
+        """
+        try:
+            doc = self.collections['log'].find_one({}, {'_id': 1}, sort=[('_id', -1)])
+            self._reader_log_cursor = doc['_id'] if doc is not None else None
+        except Exception as e:
+            self.logger.debug(f'Could not init reader-log cursor: {type(e)}, {e}')
+            self._reader_log_cursor = None
+
+    def _set_run_flags(self, number, detectors, flags):
+        """
+        Set run-level flags on the run document in the runs DB.
+        """
+        try:
+            query = {'number': int(number), 'detectors': detectors}
+            updates = {'$set': dict(flags)}
+            self.collections['run'].update_one(query, updates)
+        except Exception as e:
+            self.logger.error(f'Could not set run flags for run {number}: {type(e)}, {e}')
+
+    def _push_run_tag(self, number, detectors, name, user='daq'):
+        """
+        Add a tag entry to the run document, if it's not already present.
+        """
+        try:
+            query = {
+                'number': int(number),
+                'detectors': detectors,
+                'tags.name': {'$nin': [name]},
+            }
+            updates = {'$push': {'tags': {'name': name, 'user': user, 'date': now()}}}
+            self.collections['run'].update_one(query, updates)
+        except Exception as e:
+            self.logger.error(f'Could not push run tag {name} for run {number}: {type(e)}, {e}')
+
+    def process_reader_issue_flags(self, latest_status):
+        """
+        Scan the control-db log collection for reader messages that should be
+        promoted to run-level flags/tags in the runs database.
+        """
+        try:
+            # In linked mode the logical detector doesn't map 1:1 to a run doc,
+            # so we use the physical detector list from the latest status docs.
+            runid_to_detectors = {}
+            for detector, doc in latest_status.items():
+                dets = doc.get('detectors')
+                run_num = doc.get('number', -1)
+                if dets is None or run_num in (-1, None):
+                    continue
+                runid_to_detectors[int(run_num)] = dets
+
+            # Nothing to do if we don't know any active run numbers.
+            if not len(runid_to_detectors):
+                return
+
+            query = {
+                'runid': {'$exists': True, '$ne': -1},
+                'message': {'$regex': '(Missed an event from|Skipped an event from)'},
+            }
+            if self._reader_log_cursor is not None:
+                query['_id'] = {'$gt': self._reader_log_cursor}
+
+            for logdoc in self.collections['log'].find(query, sort=[('_id', 1)]):
+                self._reader_log_cursor = logdoc['_id']
+                runid = logdoc.get('runid', -1)
+                if runid in (-1, None):
+                    continue
+                runid = int(runid)
+                message = logdoc.get('message', '')
+
+                # Best-effort detectors resolution; if we can't, we still set
+                # the flag on all matching run docs by number (no detectors filter).
+                detectors = runid_to_detectors.get(runid)
+
+                if 'Missed an event from' in message and runid not in self._runs_flagged_missed_event:
+                    if detectors is None:
+                        try:
+                            self.collections['run'].update_one(
+                                {'number': runid},
+                                {'$set': {'daq_missed_event': True}},
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        self._set_run_flags(runid, detectors, {'daq_missed_event': True})
+                        self._push_run_tag(runid, detectors, 'daq_missed_event')
+                    self._runs_flagged_missed_event.add(runid)
+
+                if 'Skipped an event from' in message and runid not in self._runs_flagged_skipped_events:
+                    if detectors is None:
+                        try:
+                            self.collections['run'].update_one(
+                                {'number': runid},
+                                {'$set': {'daq_skipped_events': True}},
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        self._set_run_flags(runid, detectors, {'daq_skipped_events': True})
+                        self._push_run_tag(runid, detectors, 'daq_skipped_events')
+                    self._runs_flagged_skipped_events.add(runid)
+        except Exception as e:
+            self.logger.debug(f'process_reader_issue_flags failed: {type(e)}, {e}')
+            return
 
 
     def get_update(self, dc):
@@ -777,7 +891,10 @@ class MongoConnect(object):
             'user': self.goal_state[detector]['user'],
             'mode': self.goal_state[detector]['mode'],
             'bootstrax': {'state': None},
-            'end': None
+            'end': None,
+            # Run-level flags (can be updated asynchronously during the run)
+            'daq_missed_event': False,
+            'daq_skipped_events': False,
         }
 
         # If there's a source add the source. Also add the complete ini file.

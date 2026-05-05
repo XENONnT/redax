@@ -96,6 +96,10 @@ def main(config, control_mc, logger, daq_config, vme_config, SlackBot, runs_mc, 
         if (latest_status := mc.get_update(current_config)) is None:
             continue
 
+        # Promote selected reader issues from the control-db log collection to
+        # run-level flags/tags in the runs database.
+        mc.process_reader_issue_flags(latest_status)
+
         # Print an update
         for detector in latest_status.keys():
             state = 'ACTIVE' if goal_state[detector]['active'] == 'true' else 'INACTIVE'
