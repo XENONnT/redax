@@ -8,12 +8,25 @@
 #include <thread>
 #include <sstream>
 #include <bitset>
+#include <fstream>
 #include <ctime>
 #include <cmath>
 
 namespace fs=std::experimental::filesystem;
 using namespace std::chrono;
 const int event_header_words = 4, max_channels = 16;
+const uint32_t event_counter_mask = 0x00FFFFFF;
+const int max_inferred_deadtime_per_gap = 10000;
+
+static int64_t GetFullEventTick(const std::unique_ptr<data_packet>& dp, uint32_t event_time) {
+  // Return timestamp in digitizer ticks: (rollovers<<31) + 31-bit Trigger Time Tag.
+  // We apply the same small rollover fix-up as used in UnpackChannelHeader.
+  long rollovers = dp->clock_counter;
+  if (rollovers < 0) rollovers = 0;
+  if (event_time > 15e8 && dp->header_time < 5e8 && rollovers != 0) rollovers--;
+  else if (event_time < 5e8 && dp->header_time > 15e8) rollovers++;
+  return (int64_t(rollovers) << 31) + event_time;
+}
 
 long compress_blosc(std::shared_ptr<std::string>& in, std::shared_ptr<std::string>& out, long& size_in) {
   long max_compressed_size = size_in + BLOSC_MAX_OVERHEAD;
@@ -139,7 +152,9 @@ void StraxFormatter::GenerateArtificialDeadtime(int64_t timestamp, const std::sh
   fragment.reserve(fFullFragmentSize);
   timestamp *= digi->GetClockWidth(); // TODO nv
   int32_t length = fFragmentBytes>>1;
-  int16_t sw = digi->SampleWidth(), channel = digi->GetADChannel(), zero = 0;
+  int16_t sw = digi->SampleWidth();
+  int16_t channel = digi->GetADChannel(); // fArtificialDeadtimeChannel
+  int16_t zero = 0;
   fragment.append((char*)&timestamp, sizeof(timestamp));
   fragment.append((char*)&length, sizeof(length));
   fragment.append((char*)&sw, sizeof(sw));
@@ -155,54 +170,192 @@ void StraxFormatter::GenerateArtificialDeadtime(int64_t timestamp, const std::sh
 
 void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
   // Take a buffer and break it up into one document per channel
-  auto it = dp->buff.begin();
+  const int bid = dp->digi ? dp->digi->bid() : -1;
+  auto buff_begin = dp->buff.begin();
+  auto buff_end = dp->buff.end();
+  const unsigned buff_size = unsigned(dp->buff.size());
+  const char32_t* const buff_data = dp->buff.data();
+  GapState* const gs = (bid >= 0) ? &fGapState[bid] : nullptr;
+  const std::string missed_filename = std::to_string(fOptions->GetInt("number", -1)) + "_missed";
+
+  auto it = buff_begin;
   int evs_this_dp(0), words(0);
   bool missed = false;
   std::map<int, int> dpc;
-  do {
+  while (it < buff_end && fActive == true) {
     if((*it)>>28 == 0xA){
+      words = (*it) & 0x0FFFFFFF;
+      auto idx = std::distance(buff_begin, it);
+      auto remaining = std::distance(it, buff_end);
+      if (words < event_header_words || words > remaining) {
+        uint32_t event_time = 0xFFFFFFFF;
+        uint32_t event_counter = 0xFFFFFFFF;
+        if (remaining >= event_header_words) {
+          event_counter = uint32_t(*(it + 2)) & event_counter_mask;
+          event_time = uint32_t(*(it + 3)) & 0x7FFFFFFF;
+        }
+        if (gs && !gs->in_gap) {
+          gs->in_gap = true;
+          gs->reason = GapReason::CorruptEventHeaderWords;
+          gs->gaps_total++;
+          if (gs->have_last) {
+            gs->gap_counter = gs->last_counter;
+            gs->gap_tick = gs->last_tick;
+          }
+        }
+        fLog->Entry(MongoLog::Warning,
+            "Corrupt event header from %i at idx %x/%x: event_words %x remaining %x (w0 %x ttt %x ctr %x)",
+            bid,
+            unsigned(idx), buff_size, unsigned(words), unsigned(remaining),
+            unsigned(uint32_t(*it)), unsigned(event_time), unsigned(event_counter));
+        missed = false;
+        ++it;
+        continue;
+      }
       missed = true; // it works out
-      words = (*it)&0xFFFFFFF;
-      std::u32string_view sv(dp->buff.data() + std::distance(dp->buff.begin(), it), words);
+      std::u32string_view sv(buff_data + idx, words);
       // std::u32string_view sv(it, it+words); //c++20 :(
       ProcessEvent(sv, dp, dpc);
       evs_this_dp++;
       it += words;
     } else {
       if (missed) {
+        if (gs && !gs->in_gap) {
+          gs->in_gap = true;
+          gs->reason = GapReason::MissedHeaderScan;
+          gs->gaps_total++;
+          if (gs->have_last) {
+            gs->gap_counter = gs->last_counter;
+            gs->gap_tick = gs->last_tick;
+          }
+        }
         fLog->Entry(MongoLog::Warning, "Missed an event from %i at idx %x/%x (%x)",
-            dp->digi->bid(), std::distance(dp->buff.begin(), it), dp->buff.size(), *it);
+            bid, unsigned(std::distance(buff_begin, it)), buff_size, unsigned(uint32_t(*it)));
         missed = false;
         // this happens quite rarely, the chance of overwriting ourselves is vanishing
         // but it's nice to be able to know why we missed an event
-        std::string filename = std::to_string(fOptions->GetInt("number", -1)) + "_missed";
-        std::ofstream fout(filename, std::ios::out | std::ios::binary);
-        fout.write((char*)dp->buff.data(), dp->buff.size()*sizeof(dp->buff[0]));
+        std::ofstream fout(missed_filename, std::ios::out | std::ios::binary);
+        fout.write((const char*)buff_data, std::streamsize(buff_size*sizeof(buff_data[0])));
         fout.close();
       }
-      it++;
+      ++it;
     }
-  } while (it < dp->buff.end() && fActive == true);
-  fBytesProcessed += dp->buff.size()*sizeof(char32_t);
+  }
+  fBytesProcessed += buff_size*sizeof(char32_t);
   fEvPerDP[evs_this_dp]++;
   {
     const std::lock_guard<std::mutex> lk(fDPC_mutex);
     for (auto& p : dpc) fDataPerChan[p.first] += p.second;
   }
-  fInputBufferSize -= dp->buff.size()*sizeof(char32_t);
+  fInputBufferSize -= buff_size*sizeof(char32_t);
 }
 
 int StraxFormatter::ProcessEvent(std::u32string_view buff,
     const std::unique_ptr<data_packet>& dp, std::map<int, int>& dpc) {
   // buff = start of event
 
-  // returns {words this event, channel mask, board fail, header timestamp}
-  auto [words, channel_mask, fail, event_time] = dp->digi->UnpackEventHeader(buff);
+  // returns {words this event, channel mask, board fail, header timestamp, event counter}
+  auto [words, channel_mask, fail, event_time, event_counter] = dp->digi->UnpackEventHeader(buff);
+  const int bid = dp->digi ? dp->digi->bid() : -1;
+  const int64_t event_tick = GetFullEventTick(dp, event_time);
+
+  if (bid >= 0) {
+    auto& gs = fGapState[bid];
+    if (gs.in_gap) {
+      if (!gs.have_last) {
+        gs.gaps_unresolvable++;
+        dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
+        fLog->Entry(MongoLog::Warning,
+            "Gap closed without anchor from %i: curr_ctr %u ttt 0x%x reason %i",
+            bid, unsigned(event_counter), unsigned(event_time), int(gs.reason));
+      } else {
+        const uint32_t delta = (event_counter - gs.gap_counter) & event_counter_mask;
+        if (delta == 0 || event_tick <= gs.gap_tick) {
+          gs.gaps_unresolvable++;
+          dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
+          fLog->Entry(MongoLog::Warning,
+              "Unresolvable gap from %i: ctr %u->%u ttt 0x%x->0x%x reason %i",
+              bid,
+              unsigned(gs.gap_counter), unsigned(event_counter),
+              unsigned(uint32_t(gs.gap_tick) & 0x7FFFFFFF), unsigned(event_time),
+              int(gs.reason));
+        } else {
+          const long missed_events = long(delta) - 1;
+          if (missed_events > 0) {
+            gs.missed_events += missed_events;
+            if (delta - 1 <= uint32_t(max_inferred_deadtime_per_gap)) {
+              // Infer timestamps of the missing event counters by linear interpolation in tick space.
+              const int64_t tick_span = event_tick - gs.gap_tick;
+              for (uint32_t k = 1; k < delta; k++) {
+                const int64_t inferred_tick = gs.gap_tick + (tick_span * int64_t(k)) / int64_t(delta);
+                if (gs.last_deadtime_end_tick != 0 && inferred_tick < gs.last_deadtime_end_tick)
+                  continue;
+                GenerateArtificialDeadtime(inferred_tick, dp->digi);
+                int64_t duration_ticks = fFragmentBytes >> 1;
+                int clock_width = dp->digi->GetClockWidth();
+                if (clock_width <= 0) clock_width = 1;
+                int dt_ratio = dp->digi->SampleWidth() / clock_width;
+                if (dt_ratio <= 0) dt_ratio = 1;
+                duration_ticks *= dt_ratio;
+                gs.last_deadtime_end_tick = inferred_tick + duration_ticks;
+              }
+            } else {
+              fLog->Entry(MongoLog::Warning,
+                  "Gap from %i too large to infer deadtime markers: ctr %u->%u missed %li",
+                  bid, unsigned(gs.gap_counter), unsigned(event_counter), missed_events);
+            }
+          }
+          fLog->Entry(MongoLog::Warning,
+              "Gap closed from %i: reason %i ctr %u->%u missed %li",
+              bid, int(gs.reason), unsigned(gs.gap_counter), unsigned(event_counter), missed_events);
+        }
+      }
+      gs.in_gap = false;
+      gs.reason = GapReason::None;
+    }
+  }
+
+  if (words < event_header_words || size_t(words) > buff.size()) {
+    if (bid >= 0) {
+      auto& gs = fGapState[bid];
+      if (!gs.in_gap) {
+        gs.in_gap = true;
+        gs.reason = GapReason::CorruptEventSize;
+        gs.gaps_total++;
+        if (gs.have_last) {
+          gs.gap_counter = gs.last_counter;
+          gs.gap_tick = gs.last_tick;
+        }
+      }
+    }
+    fLog->Entry(MongoLog::Warning,
+        "Corrupt event size from %i: event_words %x buff_words %x (ttt %x ctr %x)",
+        bid, unsigned(words), unsigned(buff.size()), unsigned(event_time), unsigned(event_counter));
+    return int(buff.size());
+  }
 
   if(fail){ // board fail
-    //GenerateArtificialDeadtime(((dp->clock_counter<<31) + dp->header_time), dp->digi);
+    // Mark possible data loss with an "artificial deadtime" raw record.
+    // Timestamp is in digitizer clock ticks (TTT), we convert to ns inside GenerateArtificialDeadtime.
+    if (bid >= 0) {
+      auto& gs = fGapState[bid];
+      if (!gs.in_gap) {
+        gs.in_gap = true;
+        gs.reason = GapReason::BoardFail;
+        gs.gaps_total++;
+        if (gs.have_last) {
+          gs.gap_counter = gs.last_counter;
+          gs.gap_tick = gs.last_tick;
+        }
+      }
+    }
+    GenerateArtificialDeadtime(event_tick, dp->digi);
+    const long rollovers = long(uint64_t(event_tick) >> 31);
+    fLog->Entry(MongoLog::Warning,
+        "Board %i board-fail flag set: event_counter %u ttt 0x%x rollovers %li (dp ht 0x%x cc %li)",
+        bid, unsigned(event_counter), unsigned(event_time), rollovers, unsigned(dp->header_time), dp->clock_counter);
     dp->digi->CheckFail(true);
-    fFailCounter[dp->digi->bid()]++;
+    fFailCounter[bid]++;
     return event_header_words;
   }
 
@@ -210,12 +363,38 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
   int ret;
   int frags(0);
   unsigned n_chan = dp->digi->GetNumChannels();
+  bool corrupt_channel = false;
 
   for(unsigned ch=0; ch<n_chan; ch++){
     if (channel_mask & (1<<ch)) {
       ret = ProcessChannel(buff, words, channel_mask, event_time, frags, ch, dp, dpc);
+      if (ret <= 0 || size_t(ret) > buff.size()) {
+        if (bid >= 0) {
+          auto& gs = fGapState[bid];
+          if (!gs.in_gap) {
+            gs.in_gap = true;
+            gs.reason = GapReason::CorruptChannelHeader;
+            gs.gaps_total++;
+            if (gs.have_last) {
+              gs.gap_counter = gs.last_counter;
+              gs.gap_tick = gs.last_tick;
+            }
+          }
+        }
+        fLog->Entry(MongoLog::Warning,
+            "Corrupt channel header from %i: ch %i channel_words %x remaining_words %x (ttt %x ctr %x)",
+            bid, ch, unsigned(ret), unsigned(buff.size()), unsigned(event_time), unsigned(event_counter));
+        corrupt_channel = true;
+        break;
+      }
       buff.remove_prefix(ret);
     }
+  }
+  if (!corrupt_channel && bid >= 0) {
+    auto& gs = fGapState[bid];
+    gs.have_last = true;
+    gs.last_counter = event_counter & event_counter_mask;
+    gs.last_tick = event_tick;
   }
   fFragsPerEvent[frags]++;
   return words;
@@ -345,6 +524,21 @@ void StraxFormatter::Process() {
   }
   if (fBytesProcessed > 0)
     End();
+  for (auto& [bid, gs] : fGapState) {
+    if (gs.in_gap) {
+      // We opened a gap but never saw a subsequent valid header to close it.
+      fLog->Entry(MongoLog::Warning,
+          "Unclosed gap from %i at end of processing: reason %i (gaps %li unresolvable %li missed %li)",
+          bid, int(gs.reason), gs.gaps_total, gs.gaps_unresolvable, gs.missed_events);
+      gs.in_gap = false;
+      gs.reason = GapReason::None;
+    }
+    if (gs.gaps_total || gs.gaps_unresolvable || gs.missed_events) {
+      fLog->Entry(MongoLog::Local,
+          "Missed-event summary for %i: gaps %li unresolvable %li missed_events %li",
+          bid, gs.gaps_total, gs.gaps_unresolvable, gs.missed_events);
+    }
+  }
   if (fMutexWaitTime.size() > 0) std::sort(fMutexWaitTime.begin(), fMutexWaitTime.end());
 }
 
@@ -487,4 +681,3 @@ std::vector<std::string> StraxFormatter::GetChunkNames(int chunk) {
     GetStringFormat(chunk+1)+"_pre"}};
   return ret;
 }
-

@@ -63,6 +63,32 @@ public:
   int ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>&, int);
 
 private:
+  enum class GapReason : uint8_t {
+    None = 0,
+    CorruptEventHeaderWords,
+    MissedHeaderScan,
+    CorruptEventSize,
+    CorruptChannelHeader,
+    BoardFail
+  };
+
+  struct GapState {
+    bool have_last = false;
+    uint32_t last_counter = 0;
+    int64_t last_tick = 0; // digitizer ticks, i.e. TTT + rollovers (not ns)
+
+    bool in_gap = false;
+    GapReason reason = GapReason::None;
+    uint32_t gap_counter = 0;
+    int64_t gap_tick = 0;
+
+    long gaps_total = 0;
+    long gaps_unresolvable = 0;
+    long missed_events = 0;
+
+    int64_t last_deadtime_end_tick = 0;
+  };
+
   void ProcessDatapacket(std::unique_ptr<data_packet> dp);
   int ProcessEvent(std::u32string_view, const std::unique_ptr<data_packet>&,
       std::map<int, int>&);
@@ -97,6 +123,7 @@ private:
   std::atomic_bool fActive;
   std::map<int, std::list<std::string>> fChunks, fOverlaps;
   std::map<int, int> fFailCounter;
+  std::map<int, GapState> fGapState;
   std::map<int, int> fDataPerChan;
   std::mutex fDPC_mutex;
   std::map<int, long> fBufferCounter;

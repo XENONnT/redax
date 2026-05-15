@@ -35,10 +35,15 @@ class V1724{
   inline unsigned GetNumChannels() {return fNChannels;}
   int SetThresholds(std::vector<uint16_t> vals);
 
-  virtual std::tuple<int, int, bool, uint32_t> UnpackEventHeader(std::u32string_view);
+  virtual std::tuple<int, int, bool, uint32_t, uint32_t> UnpackEventHeader(std::u32string_view);
   virtual std::tuple<int64_t, int, uint16_t, std::u32string_view> UnpackChannelHeader(std::u32string_view, long, uint32_t, uint32_t, int, int, short);
 
   inline bool CheckFail(bool val=false) {bool ret = fError; fError = val; return ret;}
+  static constexpr unsigned ErrorFormatterUnresolvableGap = 0x4;
+  inline void SignalSoftError(unsigned flags) {
+    fSoftErrors.fetch_or(flags, std::memory_order_relaxed);
+    fError.store(true, std::memory_order_relaxed);
+  }
   void SetFlags(int flags) {fRegisterFlags = flags;}
   void ResetFlags() {fRegisterFlags = 1;}
   int BaselineStep(std::vector<uint16_t>&, std::vector<int>&, std::vector<double>&, int);
@@ -104,6 +109,7 @@ protected:
   std::shared_ptr<MongoLog> fLog;
   std::shared_ptr<Options> fOptions;
   std::atomic_bool fError;
+  std::atomic_uint fSoftErrors{0};
 
   float fBLTSafety;
   int fSampleWidth, fClockCycle;

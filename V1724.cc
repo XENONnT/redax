@@ -140,13 +140,15 @@ uint32_t V1724::GetAcquisitionStatus(){
 }
 
 int V1724::CheckErrors(){
+  const unsigned soft = fSoftErrors.exchange(0, std::memory_order_relaxed);
   auto pll = ReadRegister(fBoardFailStatRegister);
   auto ros = ReadRegister(fReadoutStatusRegister);
   unsigned ERR = 0xFFFFFFFF;
-  if ((pll == ERR) || (ros == ERR)) return -1;
+  if ((pll == ERR) || (ros == ERR)) return soft ? int(soft) : -1;
   int ret = 0;
   if (pll & (1 << 4)) ret |= 0x1;
   if (ros & (1 << 2)) ret |= 0x2;
+  ret |= int(soft);
   return ret;
 }
 
@@ -323,13 +325,22 @@ bool V1724::MonitorRegister(uint32_t reg, uint32_t mask, int ntries, int sleep, 
   return false;
 }
 
-std::tuple<int, int, bool, uint32_t> V1724::UnpackEventHeader(std::u32string_view sv) {
-  // returns {words this event, channel mask, board fail, header timestamp}
-  return {sv[0]&0xFFFFFFF, sv[1]&0xFF, sv[1]&0x4000000, sv[3]&0x7FFFFFFF};
+std::tuple<int, int, bool, uint32_t, uint32_t> V1724::UnpackEventHeader(std::u32string_view sv) {
+  // returns {words this event, channel mask, board fail, header timestamp, event counter}
+  // Event counter: bits[23:0] of the 3rd header word (CAEN UM3248, V1724 user manual).
+  if (sv.size() < 4)
+    return {int(sv.size()), 0, true, 0xFFFFFFFF, 0xFFFFFFFF};
+  return {sv[0] & 0x0FFFFFFF,
+          sv[1] & 0x000000FF,
+          bool(sv[1] & 0x04000000),
+          sv[3] & 0x7FFFFFFF,
+          sv[2] & 0x00FFFFFF};
 }
 
 std::tuple<int64_t, int, uint16_t, std::u32string_view> V1724::UnpackChannelHeader(std::u32string_view sv, long rollovers, uint32_t header_time, uint32_t, int, int, short ch) {
   // returns {timestamp (ns), words this channel, baseline, waveform}
+  if (sv.size() < 2)
+    return {0, int(sv.size()), 0, sv.substr(sv.size(), 0)};
   long ch_time = sv[1]&0x7FFFFFFF;
   int words = sv[0]&0x7FFFFF;
   // More rollover logic here, because channels are independent and the
@@ -402,7 +413,7 @@ int V1724::BaselineStep(std::vector<uint16_t>& dac_values, std::vector<int>& cha
   while (it < dp->buff.end()) {
     if ((*it) >> 28 == 0xA) {
       std::u32string_view sv(dp->buff.data() + std::distance(dp->buff.begin(), it), (*it)&0xFFFFFFF);
-      std::tie(words_in_event, channel_mask, std::ignore, std::ignore) = UnpackEventHeader(sv);
+      std::tie(words_in_event, channel_mask, std::ignore, std::ignore, std::ignore) = UnpackEventHeader(sv);
       if (words_in_event == 4) {
         it += 4;
         continue;

@@ -204,7 +204,6 @@ void DAQController::ReadData(int link){
   int bytes_this_loop(0);
   fRunning[link] = true;
   std::chrono::microseconds sleep_time(fOptions->GetInt("us_between_reads", 10));
-  int c = 0;
   const int num_threads = fNProcessingThreads;
   while(fReadLoop){
     for(auto& digi : fDigitizers[link]) {
@@ -242,7 +241,19 @@ void DAQController::ReadData(int link){
     if (local_buffer.size() && (readcycler % transfer_batch == 0)) {
       fDataRate += bytes_this_loop;
       auto t_start = std::chrono::high_resolution_clock::now();
-      while (fFormatters[(++c)%num_threads]->ReceiveDatapackets(local_buffer, bytes_this_loop)) {}
+      std::vector<std::list<std::unique_ptr<data_packet>>> send_buffer(num_threads);
+      std::vector<int> bytes_per_thread(num_threads, 0);
+      for (auto it = local_buffer.begin(); it != local_buffer.end(); ) {
+        const int bid = (*it && (*it)->digi) ? (*it)->digi->bid() : 0;
+        const int thread_idx = (bid >= 0) ? (bid % num_threads) : 0;
+        bytes_per_thread[thread_idx] += (*it)->buff.size() * sizeof(char32_t);
+        auto cur = it++;
+        send_buffer[thread_idx].splice(send_buffer[thread_idx].end(), local_buffer, cur);
+      }
+      for (int thread_idx = 0; thread_idx < num_threads; thread_idx++) {
+        if (send_buffer[thread_idx].empty()) continue;
+        while (fFormatters[thread_idx]->ReceiveDatapackets(send_buffer[thread_idx], bytes_per_thread[thread_idx])) {}
+      }
       auto t_end = std::chrono::high_resolution_clock::now();
       mutex_wait_times.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
             t_end-t_start).count());
@@ -472,4 +483,3 @@ int DAQController::FitBaselines(std::vector<std::shared_ptr<V1724>> &digis,
       }
   return 1;
 }
-
