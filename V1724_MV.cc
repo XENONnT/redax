@@ -7,7 +7,7 @@ V1724(log, opts, bid, address) {
   // MV boards seem to have reg 0x1n80 for channel n threshold
   fChTrigRegister = 0x1080;
   fInputDelayRegister = fInputDelayChRegister = 0xFFFFFFFF; // disabled
-  fArtificialDeadtimeChannel = 791;
+  fArtificialDeadtimeChannel = 799;
   fDefaultDelay = 0;
   fDefaultPreTrig = 0; // no default provided
   fPreTrigRegister = 0x8114; // actually the post-trig register

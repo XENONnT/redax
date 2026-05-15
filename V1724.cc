@@ -48,7 +48,7 @@ V1724::V1724(std::shared_ptr<MongoLog>& log, std::shared_ptr<Options>& opts, int
   fBLTalloc = opts->GetBLTalloc();
   // there's a more elegant way to do this, but I'm not going to write it
   fClockPeriod = std::chrono::nanoseconds((1l<<31)*fClockCycle);
-  fArtificialDeadtimeChannel = 790;
+  fArtificialDeadtimeChannel = 799;
   fDefaultDelay = 0xA * 2 * fSampleWidth; // see register document
   fDefaultPreTrig = 6 * 2 * fSampleWidth; // see register document
   fRegisterFlags = 1;

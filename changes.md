@@ -49,6 +49,12 @@ Alongside this it now checks that the size of the header is valid (likely not ne
 
 Soft-error plumbing to reuse the existing DAQ error state translator, code 0x4 now corresponds to a software induced "board" error that sets the DAQ in error state in case of an unrecoverable bad header (from the start of the first packet) 
 
+The V1274_MV.* receive these changes via inheritance.
+
+Changed the default AQMon Channel to straxen respected 799, vetoing interval is only defined in straxen for this channel as the remaining dedicated channels never saw use. In favor of simplicity this channel is used.
+
 ## V1730.*
 
 Matching the V1724 updates alongside making the 48 bit timestamp assembly explicit. 
+
+Changed the default AQMon Channel to straxen respected 799, vetoing interval is only defined in straxen for this channel as the remaining dedicated channels never saw use. In favor of simplicity this channel is used.
