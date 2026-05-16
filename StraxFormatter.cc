@@ -176,7 +176,6 @@ void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
   const unsigned buff_size = unsigned(dp->buff.size());
   const char32_t* const buff_data = dp->buff.data();
   GapState* const gs = (bid >= 0) ? &fGapState[bid] : nullptr;
-  const std::string missed_filename = std::to_string(fOptions->GetInt("number", -1)) + "_missed";
 
   auto it = buff_begin;
   int evs_this_dp(0), words(0);
@@ -203,11 +202,6 @@ void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
             gs->gap_tick = gs->last_tick;
           }
         }
-        fLog->Entry(MongoLog::Warning,
-            "Corrupt event header from %i at idx %x/%x: event_words %x remaining %x (w0 %x ttt %x ctr %x)",
-            bid,
-            unsigned(idx), buff_size, unsigned(words), unsigned(remaining),
-            unsigned(uint32_t(*it)), unsigned(event_time), unsigned(event_counter));
         missed = false;
         ++it;
         continue;
@@ -229,14 +223,7 @@ void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
             gs->gap_tick = gs->last_tick;
           }
         }
-        fLog->Entry(MongoLog::Warning, "Missed an event from %i at idx %x/%x (%x)",
-            bid, unsigned(std::distance(buff_begin, it)), buff_size, unsigned(uint32_t(*it)));
         missed = false;
-        // this happens quite rarely, the chance of overwriting ourselves is vanishing
-        // but it's nice to be able to know why we missed an event
-        std::ofstream fout(missed_filename, std::ios::out | std::ios::binary);
-        fout.write((const char*)buff_data, std::streamsize(buff_size*sizeof(buff_data[0])));
-        fout.close();
       }
       ++it;
     }
@@ -262,27 +249,22 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
   if (bid >= 0) {
     auto& gs = fGapState[bid];
     if (gs.in_gap) {
+      long missed_known = 0;
+      long missed_unknown = 0;
       if (!gs.have_last) {
         gs.gaps_unresolvable++;
+        missed_unknown = 1;
         dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
-        fLog->Entry(MongoLog::Warning,
-            "Gap closed without anchor from %i: curr_ctr %u ttt 0x%x reason %i",
-            bid, unsigned(event_counter), unsigned(event_time), int(gs.reason));
       } else {
         const uint32_t delta = (event_counter - gs.gap_counter) & event_counter_mask;
         if (delta == 0 || event_tick <= gs.gap_tick) {
           gs.gaps_unresolvable++;
+          missed_unknown = 1;
           dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
-          fLog->Entry(MongoLog::Warning,
-              "Unresolvable gap from %i: ctr %u->%u ttt 0x%x->0x%x reason %i",
-              bid,
-              unsigned(gs.gap_counter), unsigned(event_counter),
-              unsigned(uint32_t(gs.gap_tick) & 0x7FFFFFFF), unsigned(event_time),
-              int(gs.reason));
         } else {
-          const long missed_events = long(delta) - 1;
-          if (missed_events > 0) {
-            gs.missed_events += missed_events;
+          missed_known = long(delta) - 1;
+          if (missed_known > 0) {
+            gs.missed_events += missed_known;
             if (delta - 1 <= uint32_t(max_inferred_deadtime_per_gap)) {
               // Infer timestamps of the missing event counters by linear interpolation in tick space.
               const int64_t tick_span = event_tick - gs.gap_tick;
@@ -299,17 +281,13 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
                 duration_ticks *= dt_ratio;
                 gs.last_deadtime_end_tick = inferred_tick + duration_ticks;
               }
-            } else {
-              fLog->Entry(MongoLog::Warning,
-                  "Gap from %i too large to infer deadtime markers: ctr %u->%u missed %li",
-                  bid, unsigned(gs.gap_counter), unsigned(event_counter), missed_events);
             }
           }
-          fLog->Entry(MongoLog::Warning,
-              "Gap closed from %i: reason %i ctr %u->%u missed %li",
-              bid, int(gs.reason), unsigned(gs.gap_counter), unsigned(event_counter), missed_events);
         }
       }
+      fLog->Entry(MongoLog::Warning,
+          "Gap bid=%i reason=%i missed_events=%li+%li",
+          bid, int(gs.reason), missed_known, missed_unknown);
       gs.in_gap = false;
       gs.reason = GapReason::None;
     }
@@ -328,9 +306,6 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
         }
       }
     }
-    fLog->Entry(MongoLog::Warning,
-        "Corrupt event size from %i: event_words %x buff_words %x (ttt %x ctr %x)",
-        bid, unsigned(words), unsigned(buff.size()), unsigned(event_time), unsigned(event_counter));
     return int(buff.size());
   }
 
@@ -350,10 +325,6 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
       }
     }
     GenerateArtificialDeadtime(event_tick, dp->digi);
-    const long rollovers = long(uint64_t(event_tick) >> 31);
-    fLog->Entry(MongoLog::Warning,
-        "Board %i board-fail flag set: event_counter %u ttt 0x%x rollovers %li (dp ht 0x%x cc %li)",
-        bid, unsigned(event_counter), unsigned(event_time), rollovers, unsigned(dp->header_time), dp->clock_counter);
     dp->digi->CheckFail(true);
     fFailCounter[bid]++;
     return event_header_words;
@@ -381,9 +352,6 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
             }
           }
         }
-        fLog->Entry(MongoLog::Warning,
-            "Corrupt channel header from %i: ch %i channel_words %x remaining_words %x (ttt %x ctr %x)",
-            bid, ch, unsigned(ret), unsigned(buff.size()), unsigned(event_time), unsigned(event_counter));
         corrupt_channel = true;
         break;
       }
@@ -527,16 +495,17 @@ void StraxFormatter::Process() {
   for (auto& [bid, gs] : fGapState) {
     if (gs.in_gap) {
       // We opened a gap but never saw a subsequent valid header to close it.
+      gs.gaps_unresolvable++;
       fLog->Entry(MongoLog::Warning,
-          "Unclosed gap from %i at end of processing: reason %i (gaps %li unresolvable %li missed %li)",
-          bid, int(gs.reason), gs.gaps_total, gs.gaps_unresolvable, gs.missed_events);
+          "Unclosed gap bid=%i reason=%i missed_events=0+1",
+          bid, int(gs.reason));
       gs.in_gap = false;
       gs.reason = GapReason::None;
     }
     if (gs.gaps_total || gs.gaps_unresolvable || gs.missed_events) {
       fLog->Entry(MongoLog::Local,
-          "Missed-event summary for %i: gaps %li unresolvable %li missed_events %li",
-          bid, gs.gaps_total, gs.gaps_unresolvable, gs.missed_events);
+          "Missed-event summary for %i: gaps %li unresolvable %li missed_events %li+%li",
+          bid, gs.gaps_total, gs.gaps_unresolvable, gs.missed_events, gs.gaps_unresolvable);
     }
   }
   if (fMutexWaitTime.size() > 0) std::sort(fMutexWaitTime.begin(), fMutexWaitTime.end());
