@@ -251,16 +251,17 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
     if (gs.in_gap) {
       long missed_known = 0;
       long missed_unknown = 0;
+      const char* unrecoverable_why = nullptr;
       if (!gs.have_last) {
         gs.gaps_unresolvable++;
         missed_unknown = 1;
-        dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
+        unrecoverable_why = "can't find start of gap";
       } else {
         const uint32_t delta = (event_counter - gs.gap_counter) & event_counter_mask;
         if (delta == 0 || event_tick <= gs.gap_tick) {
           gs.gaps_unresolvable++;
           missed_unknown = 1;
-          dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
+          unrecoverable_why = "can't find end of gap";
         } else {
           missed_known = long(delta) - 1;
           if (missed_known > 0) {
@@ -285,9 +286,16 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
           }
         }
       }
-      fLog->Entry(MongoLog::Warning,
-          "Gap bid=%i reason=%i missed_events=%li+%li",
-          bid, int(gs.reason), missed_known, missed_unknown);
+      if (missed_unknown) {
+        fLog->Entry(MongoLog::Warning,
+            "Unrecoverable gap bid=%i missed_events=unknown: %s",
+            bid, (unrecoverable_why ? unrecoverable_why : "unknown"));
+        dp->digi->SignalSoftError(V1724::ErrorFormatterUnresolvableGap);
+      } else {
+        fLog->Entry(MongoLog::Warning,
+            "Gap bid=%i missed_events=%li",
+            bid, missed_known);
+      }
       gs.in_gap = false;
       gs.reason = GapReason::None;
     }
@@ -497,14 +505,14 @@ void StraxFormatter::Process() {
       // We opened a gap but never saw a subsequent valid header to close it.
       gs.gaps_unresolvable++;
       fLog->Entry(MongoLog::Warning,
-          "Unclosed gap bid=%i reason=%i missed_events=0+1",
-          bid, int(gs.reason));
+          "Unrecoverable gap bid=%i missed_events=unknown: can't find end of gap",
+          bid);
       gs.in_gap = false;
       gs.reason = GapReason::None;
     }
     if (gs.gaps_total || gs.gaps_unresolvable || gs.missed_events) {
       fLog->Entry(MongoLog::Local,
-          "Missed-event summary for %i: gaps %li unresolvable %li missed_events %li+%li",
+          "Missed-event summary for %i: gaps %li unrecoverable %li missed_events_known %li missed_events_unknown %li",
           bid, gs.gaps_total, gs.gaps_unresolvable, gs.missed_events, gs.gaps_unresolvable);
     }
   }
