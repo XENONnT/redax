@@ -231,6 +231,7 @@ void DAQController::ReadData(int link){
       if((words = digi->Read(dp))<0){
         dp.reset();
         fStatus = DAXHelpers::Error;
+        fReadLoop = false;
         break;
       } else if(words>0){
         dp->digi = digi;

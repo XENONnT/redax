@@ -159,14 +159,20 @@ int V1724::Reset() {
 }
 
 std::tuple<uint32_t, long> V1724::GetClockInfo(std::u32string_view sv) {
-  auto it = sv.begin();
-  do {
-    if ((*it)>>28 == 0xA) {
-      uint32_t ht = *(it+3)&0x7FFFFFFF;
-      return {ht, GetClockCounter(ht)};
-    }
-  } while (++it < sv.end());
-  fLog->Entry(MongoLog::Message, "No clock info for %i?", fBID);
+  // Scan for an event header word (0xA???????) and extract the header TTT (w3).
+  // If we don't find any header, the buffer cannot be timestamped reliably.
+  for (auto it = sv.begin(); it != sv.end(); ++it) {
+    if (((*it) >> 28) != 0xA)
+      continue;
+    const auto remaining = std::distance(it, sv.end());
+    if (remaining < 4)
+      continue;
+    const uint32_t event_words = uint32_t(*it) & 0x0FFFFFFF;
+    if (event_words < 4 || event_words > uint32_t(remaining))
+      continue;
+    const uint32_t ht = uint32_t(*(it + 3)) & 0x7FFFFFFF;
+    return {ht, GetClockCounter(ht)};
+  }
   return {0xFFFFFFFF, -1};
 }
 
@@ -277,6 +283,12 @@ int V1724::Read(std::unique_ptr<data_packet>& outptr){
     s.append((char32_t*)fROBuffer.data(), words);
     fBLTCounter[int(std::ceil(std::log2(words)))]++;
     auto [ht, cc] = GetClockInfo(s);
+    if (cc < 0) {
+      fLog->Entry(MongoLog::Error,
+          "Board %i read returned %i words but contains no valid event header; entering error state",
+          fBID, words);
+      return -1;
+    }
     outptr = std::make_unique<data_packet>(std::move(s), ht, cc);
   }
   fTotReadTime += duration_cast<nanoseconds>(high_resolution_clock::now()-t_start);
