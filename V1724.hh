@@ -37,6 +37,11 @@ class V1724{
 
   virtual std::tuple<int, int, bool, uint32_t> UnpackEventHeader(std::u32string_view);
   virtual std::tuple<int64_t, int, uint16_t, std::u32string_view> UnpackChannelHeader(std::u32string_view, long, uint32_t, uint32_t, int, int, short);
+  // Channel header layout differs between x724 and x730 families; expose just enough
+  // for safe bounds-checking in the formatter.
+  virtual bool HasPerChannelHeaders() const { return true; }
+  virtual int ChannelHeaderWords() const { return 2; }
+  virtual uint32_t ChannelSizeMask() const { return 0x7FFFFF; } // UM5954: bits[22:0]
 
   inline bool CheckFail(bool val=false) {bool ret = fError; fError = val; return ret;}
   void SetFlags(int flags) {fRegisterFlags = flags;}
@@ -55,6 +60,14 @@ class V1724{
   virtual bool EnsureStopped(int=1000, int=1000);
   virtual int CheckErrors();
   virtual uint32_t GetAcquisitionStatus();
+
+  enum SoftError : int {
+    ErrorFormatterUnrecoverableHeader = 0x4,
+  };
+  void SignalSoftError(int flags) {
+    fSoftErrorFlags.fetch_or(flags, std::memory_order_relaxed);
+    fError = true;
+  }
 
 protected:
   // Some values for base classes to override 
@@ -104,6 +117,7 @@ protected:
   std::shared_ptr<MongoLog> fLog;
   std::shared_ptr<Options> fOptions;
   std::atomic_bool fError;
+  std::atomic_int fSoftErrorFlags;
 
   float fBLTSafety;
   int fSampleWidth, fClockCycle;

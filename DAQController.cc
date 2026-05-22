@@ -227,6 +227,8 @@ void DAQController::ReadData(int link){
             fPLL++;
           }
           if (err_val & 0x2) fLog->Entry(MongoLog::Local, "Board %i has VME bus error", digi->bid());
+          if (err_val & V1724::ErrorFormatterUnrecoverableHeader)
+            fLog->Entry(MongoLog::Local, "Board %i has formatter unrecoverable header", digi->bid());
         }
       }
       if((words = digi->Read(dp))<0){
@@ -472,4 +474,3 @@ int DAQController::FitBaselines(std::vector<std::shared_ptr<V1724>> &digis,
       }
   return 1;
 }
-

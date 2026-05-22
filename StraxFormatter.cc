@@ -134,55 +134,109 @@ void StraxFormatter::GetDataPerChan(std::map<int, int>& ret) {
   return;
 }
 
-void StraxFormatter::GenerateArtificialDeadtime(int64_t timestamp, const std::shared_ptr<V1724>& digi) {
-  std::string fragment;
-  fragment.reserve(fFullFragmentSize);
-  timestamp *= digi->GetClockWidth(); // TODO nv
-  int32_t length = fFragmentBytes>>1;
-  int16_t sw = digi->SampleWidth(), channel = digi->GetADChannel(), zero = 0;
-  fragment.append((char*)&timestamp, sizeof(timestamp));
-  fragment.append((char*)&length, sizeof(length));
-  fragment.append((char*)&sw, sizeof(sw));
-  fragment.append((char*)&channel, sizeof(channel));
-  fragment.append((char*)&length, sizeof(length));
-  fragment.append((char*)&zero, sizeof(zero)); // fragment_i
-  fragment.append((char*)&zero, sizeof(zero)); // baseline
-  for (; length > 0; length--)
-    fragment.append((char*)&zero, sizeof(zero)); // wf
-  AddFragmentToBuffer(std::move(fragment), 0, 0);
-  return;
+void StraxFormatter::GenerateArtificialDeadtime(int64_t start_time_ns, int32_t samples_in_pulse,
+    const std::shared_ptr<V1724>& digi, uint32_t event_time_tag, uint16_t event_channel_mask,
+    uint16_t faulty_channel_mask) {
+  if (samples_in_pulse <= 0) return;
+
+  const int16_t dt = digi->SampleWidth();
+  const int16_t channel = digi->GetADChannel();
+  const int16_t baseline = 0;
+
+  const int16_t bid_i16 = static_cast<int16_t>(digi->bid());
+  const int16_t event_time_lo = static_cast<int16_t>(event_time_tag & 0xFFFF);
+  const int16_t event_time_hi = static_cast<int16_t>((event_time_tag >> 16) & 0xFFFF);
+  const int16_t event_mask_i16 = static_cast<int16_t>(event_channel_mask);
+  const int16_t faulty_mask_i16 = static_cast<int16_t>(faulty_channel_mask);
+
+  const int samples_per_frag = fFragmentBytes >> 1;
+  const int num_frags = std::ceil(1. * samples_in_pulse / samples_per_frag);
+
+  for (int16_t frag_i = 0; frag_i < num_frags; frag_i++) {
+    std::string fragment;
+    fragment.reserve(fFullFragmentSize);
+
+    int32_t samples_this_frag = samples_per_frag;
+    if (frag_i == num_frags - 1)
+      samples_this_frag = samples_in_pulse - frag_i * samples_per_frag;
+
+    int64_t time_this_frag = start_time_ns + int64_t(samples_per_frag) * dt * frag_i;
+    fragment.append((char*)&time_this_frag, sizeof(time_this_frag));
+    fragment.append((char*)&samples_this_frag, sizeof(samples_this_frag));
+    fragment.append((char*)&dt, sizeof(dt));
+    fragment.append((char*)&channel, sizeof(channel));
+    fragment.append((char*)&samples_in_pulse, sizeof(samples_in_pulse));
+    fragment.append((char*)&frag_i, sizeof(frag_i));
+    fragment.append((char*)&baseline, sizeof(baseline));
+
+    // Embed some metadata in the first samples of the first fragment:
+    // [0]=board id, [1:2]=event time tag (lo/hi), [3]=event channel mask, [4]=faulty channel mask
+    for (int i = 0; i < samples_this_frag; i++) {
+      int16_t v = 0;
+      if (frag_i == 0) {
+        if (i == 0) v = bid_i16;
+        else if (i == 1) v = event_time_lo;
+        else if (i == 2) v = event_time_hi;
+        else if (i == 3) v = event_mask_i16;
+        else if (i == 4) v = faulty_mask_i16;
+      }
+      fragment.append((char*)&v, sizeof(v));
+    }
+    for (; samples_this_frag < samples_per_frag; samples_this_frag++)
+      fragment.append((char*)&baseline, sizeof(baseline));
+
+    AddFragmentToBuffer(std::move(fragment), event_time_tag, 0);
+  }
 }
 
 void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
   // Take a buffer and break it up into one document per channel
-  auto it = dp->buff.begin();
-  int evs_this_dp(0), words(0);
-  bool missed = false;
+  const char32_t* const buff_data = dp->buff.data();
+  const size_t buff_words = dp->buff.size();
+  size_t idx = 0;
+  int evs_this_dp = 0;
+  bool in_gap = false;
+  size_t gap_start = 0;
+  size_t gap_words = 0;
   std::map<int, int> dpc;
-  do {
-    if((*it)>>28 == 0xA){
-      missed = true; // it works out
-      words = (*it)&0xFFFFFFF;
-      std::u32string_view sv(dp->buff.data() + std::distance(dp->buff.begin(), it), words);
-      // std::u32string_view sv(it, it+words); //c++20 :(
-      ProcessEvent(sv, dp, dpc);
-      evs_this_dp++;
-      it += words;
-    } else {
-      if (missed) {
-        fLog->Entry(MongoLog::Warning, "Missed an event from %i at idx %x/%x (%x)",
-            dp->digi->bid(), std::distance(dp->buff.begin(), it), dp->buff.size(), *it);
-        missed = false;
-        // this happens quite rarely, the chance of overwriting ourselves is vanishing
-        // but it's nice to be able to know why we missed an event
-        std::string filename = std::to_string(fOptions->GetInt("number", -1)) + "_missed";
-        std::ofstream fout(filename, std::ios::out | std::ios::binary);
-        fout.write((char*)dp->buff.data(), dp->buff.size()*sizeof(dp->buff[0]));
-        fout.close();
+
+  while (idx < buff_words && fActive == true) {
+    const uint32_t word = buff_data[idx];
+    if ((word >> 28) != 0xA) {
+      if (!in_gap) {
+        in_gap = true;
+        gap_start = idx;
+        gap_words = 0;
       }
-      it++;
+      gap_words++;
+      idx++;
+      continue;
     }
-  } while (it < dp->buff.end() && fActive == true);
+
+    if (in_gap) {
+      fLog->Entry(MongoLog::Warning, "Missed header data from %i: skipped %i words at idx %x/%x",
+          dp->digi->bid(), int(gap_words), unsigned(gap_start), unsigned(buff_words));
+      in_gap = false;
+    }
+
+    const int declared_words = word & 0x0FFFFFFF;
+    if (declared_words < event_header_words) {
+      fLog->Entry(MongoLog::Warning, "Bad event header from %i at idx %x/%x (declared %i words)",
+          dp->digi->bid(), unsigned(idx), unsigned(buff_words), declared_words);
+      idx++;
+      continue;
+    }
+
+    const size_t remaining = buff_words - idx;
+    const size_t view_words = std::min<size_t>(declared_words, remaining);
+    std::u32string_view sv(buff_data + idx, view_words);
+    ProcessEvent(sv, dp, dpc);
+    evs_this_dp++;
+
+    if (size_t(declared_words) > remaining) break; // truncated event at end of buffer
+    idx += declared_words;
+  }
+
   fBytesProcessed += dp->buff.size()*sizeof(char32_t);
   fEvPerDP[evs_this_dp]++;
   {
@@ -195,6 +249,13 @@ void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
 int StraxFormatter::ProcessEvent(std::u32string_view buff,
     const std::unique_ptr<data_packet>& dp, std::map<int, int>& dpc) {
   // buff = start of event
+
+  if (buff.size() < size_t(event_header_words)) {
+    fLog->Entry(MongoLog::Error, "Unrecoverable: event buffer too short for header from %i (%i/%i words) (DAQ error disabled)",
+        dp->digi->bid(), int(buff.size()), event_header_words);
+    // dp->digi->SignalSoftError(V1724::ErrorFormatterUnrecoverableHeader);
+    return buff.size();
+  }
 
   // returns {words this event, channel mask, board fail, header timestamp}
   auto [words, channel_mask, fail, event_time] = dp->digi->UnpackEventHeader(buff);
@@ -211,8 +272,60 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
   int frags(0);
   unsigned n_chan = dp->digi->GetNumChannels();
 
+  if (!dp->digi->HasPerChannelHeaders()) {
+    for (unsigned ch = 0; ch < n_chan; ch++) {
+      if (channel_mask & (1 << ch)) {
+        ret = ProcessChannel(buff, words, channel_mask, event_time, frags, ch, dp, dpc);
+        buff.remove_prefix(ret);
+      }
+    }
+    fFragsPerEvent[frags]++;
+    return words;
+  }
+
+  const int channel_header_words = dp->digi->ChannelHeaderWords();
+  const uint32_t channel_size_mask = dp->digi->ChannelSizeMask();
+
   for(unsigned ch=0; ch<n_chan; ch++){
     if (channel_mask & (1<<ch)) {
+      if (buff.size() < size_t(channel_header_words)) {
+        const uint16_t faulty_mask = static_cast<uint16_t>(channel_mask) & ~static_cast<uint16_t>((1u << ch) - 1u);
+        fLog->Entry(MongoLog::Error,
+            "Unrecoverable: missing channel header from %i (ch %i, have %i words, need %i) event_mask 0x%04x (DAQ error disabled)",
+            dp->digi->bid(), ch, int(buff.size()), channel_header_words, channel_mask);
+        (void)faulty_mask;
+        // dp->digi->SignalSoftError(V1724::ErrorFormatterUnrecoverableHeader);
+        break;
+      }
+
+      const int declared_channel_words = buff[0] & channel_size_mask;
+      if (declared_channel_words < channel_header_words) {
+        const uint16_t faulty_mask = static_cast<uint16_t>(channel_mask) & ~static_cast<uint16_t>((1u << ch) - 1u);
+        fLog->Entry(MongoLog::Error,
+            "Unrecoverable: invalid channel size word from %i (ch %i, declared %i words, need >=%i) event_mask 0x%04x (DAQ error disabled)",
+            dp->digi->bid(), ch, declared_channel_words, channel_header_words, channel_mask);
+        (void)faulty_mask;
+        // dp->digi->SignalSoftError(V1724::ErrorFormatterUnrecoverableHeader);
+        break;
+      }
+
+      if (size_t(declared_channel_words) > buff.size()) {
+        const uint16_t faulty_mask = static_cast<uint16_t>(channel_mask) & ~static_cast<uint16_t>((1u << ch) - 1u);
+        auto [timestamp_ns, channel_words, baseline_tmp, wf_tmp] = dp->digi->UnpackChannelHeader(
+            buff, dp->clock_counter, dp->header_time, event_time, words, 0, ch);
+        (void)baseline_tmp;
+        (void)wf_tmp;
+
+        const int wf_words = std::max(0, channel_words - channel_header_words);
+        int32_t dt_samples = 2 * wf_words;
+        const int samples_per_frag = fFragmentBytes >> 1;
+        if (dt_samples > 0) dt_samples = samples_per_frag * std::ceil(1. * dt_samples / samples_per_frag);
+
+        GenerateArtificialDeadtime(timestamp_ns, dt_samples, dp->digi, event_time,
+            static_cast<uint16_t>(channel_mask), faulty_mask);
+        break;
+      }
+
       ret = ProcessChannel(buff, words, channel_mask, event_time, frags, ch, dp, dpc);
       buff.remove_prefix(ret);
     }
@@ -487,4 +600,3 @@ std::vector<std::string> StraxFormatter::GetChunkNames(int chunk) {
     GetStringFormat(chunk+1)+"_pre"}};
   return ret;
 }
-

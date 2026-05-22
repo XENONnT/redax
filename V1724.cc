@@ -36,6 +36,7 @@ V1724::V1724(std::shared_ptr<MongoLog>& log, std::shared_ptr<Options>& opts, int
   fPreTrigRegister = 0x8038;
   fPreTrigChRegister = 0x1038;
   fError = false;
+  fSoftErrorFlags = 0;
   fBufferSize = 0x800000; // 8 MB total memory
 
   fSampleWidth = 10;
@@ -48,7 +49,7 @@ V1724::V1724(std::shared_ptr<MongoLog>& log, std::shared_ptr<Options>& opts, int
   fBLTalloc = opts->GetBLTalloc();
   // there's a more elegant way to do this, but I'm not going to write it
   fClockPeriod = std::chrono::nanoseconds((1l<<31)*fClockCycle);
-  fArtificialDeadtimeChannel = 790;
+  fArtificialDeadtimeChannel = 799;
   fDefaultDelay = 0xA * 2 * fSampleWidth; // see register document
   fDefaultPreTrig = 6 * 2 * fSampleWidth; // see register document
   fRegisterFlags = 1;
@@ -147,6 +148,7 @@ int V1724::CheckErrors(){
   int ret = 0;
   if (pll & (1 << 4)) ret |= 0x1;
   if (ros & (1 << 2)) ret |= 0x2;
+  ret |= fSoftErrorFlags.exchange(0, std::memory_order_relaxed);
   return ret;
 }
 
@@ -331,7 +333,7 @@ std::tuple<int, int, bool, uint32_t> V1724::UnpackEventHeader(std::u32string_vie
 std::tuple<int64_t, int, uint16_t, std::u32string_view> V1724::UnpackChannelHeader(std::u32string_view sv, long rollovers, uint32_t header_time, uint32_t, int, int, short ch) {
   // returns {timestamp (ns), words this channel, baseline, waveform}
   long ch_time = sv[1]&0x7FFFFFFF;
-  int words = sv[0]&0x7FFFFF;
+  int words = sv[0] & ChannelSizeMask();
   // More rollover logic here, because channels are independent and the
   // processing is multithreaded. We leverage the fact that readout windows are
   // short and polled frequently compared to the rollover timescale, so there

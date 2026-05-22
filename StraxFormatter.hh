@@ -71,7 +71,9 @@ private:
   void WriteOutChunk(int);
   void WriteOutChunks();
   void End();
-  void GenerateArtificialDeadtime(int64_t, const std::shared_ptr<V1724>&);
+  void GenerateArtificialDeadtime(int64_t start_time_ns, int32_t samples_in_pulse,
+      const std::shared_ptr<V1724>& digi, uint32_t event_time_tag, uint16_t event_channel_mask,
+      uint16_t faulty_channel_mask);
   void AddFragmentToBuffer(std::string, uint32_t, int);
   std::vector<std::string> GetChunkNames(int);
 
