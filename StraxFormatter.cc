@@ -110,12 +110,12 @@ StraxFormatter::StraxFormatter(std::shared_ptr<Options>& opts, std::shared_ptr<M
 }
 
 StraxFormatter::~StraxFormatter(){
-  /*if (fMutexWaitTime.size() > 0) {
+  if (fMutexWaitTime.size() > 0) {
     fLog->Entry(MongoLog::Local, "Thread %lx mutex report: min %i max %i mean %i median %i num %i",
         fThreadId, fMutexWaitTime.front(), fMutexWaitTime.back(),
         std::accumulate(fMutexWaitTime.begin(), fMutexWaitTime.end(), 0l)/fMutexWaitTime.size(),
         fMutexWaitTime[fMutexWaitTime.size()/2], fMutexWaitTime.size());
-  }*/
+  }
 }
 
 void StraxFormatter::Close(std::map<int,int>& ret){
