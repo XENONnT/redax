@@ -244,7 +244,23 @@ void DAQController::ReadData(int link){
     if (local_buffer.size() && (readcycler % transfer_batch == 0)) {
       fDataRate += bytes_this_loop;
       auto t_start = std::chrono::high_resolution_clock::now();
-      while (fFormatters[(++c)%num_threads]->ReceiveDatapackets(local_buffer, bytes_this_loop)) {}
+      //while (fFormatters[(++c)%num_threads]->ReceiveDatapackets(local_buffer, bytes_this_loop)) {}
+      //First work out which formatter thread to use:
+      int target_formatter = (++c) % num_threads;
+      //First lock the queue - if it is in use by a formatter or other write process it will wait - should be quite short
+	{
+      		std::unique_lock<std::mutex> lock(fFormatters[target_formatter]->fQueueMutex); 
+		while (fFormatters[target_formatter]->fQueue.size() >= 1000 && fReadLoop) {
+        	// wait() automatically unlocks the mutex and puts this thread to sleep.
+        	// When it wakes up, it re-locks the mutex and checks the 'while' condition again.
+        		fFormatters[target_formatter]->fQueueCV.wait(lock); 
+    		}
+                if(fReadLoop){
+                      fFormatters[target_formatter]->fQueue.push_back({std::move(local_buffer),bytes_this_loop});
+		      fFormatters[target_formatter]->fInputBufferSize += bytes_this_loop;
+                }
+	}//here the lock is released as it leaves the scope
+      fFormatters[target_formatter]->fQueueCV.notify_one();
       auto t_end = std::chrono::high_resolution_clock::now();
       mutex_wait_times.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
             t_end-t_start).count());
@@ -253,6 +269,11 @@ void DAQController::ReadData(int link){
     if (++readcycler > 10000) readcycler = 0;
     std::this_thread::sleep_for(sleep_time);
   } // while run
+  for (int i = 0; i < num_threads; ++i) {
+      if (fFormatters[i]) {
+          fFormatters[i]->fQueueCV.notify_one();
+      }
+  }
   if (mutex_wait_times.size() > 0) {
     std::sort(mutex_wait_times.begin(), mutex_wait_times.end());
     fLog->Entry(MongoLog::Local, "RO thread %i mutex report: min %i max %i mean %i median %i num %i",
@@ -270,6 +291,7 @@ int DAQController::OpenThreads(){
   for(int i=0; i<fNProcessingThreads; i++){
     try {
       fFormatters.emplace_back(std::make_unique<StraxFormatter>(fOptions, fLog));
+      fFormatters.back()->fReadLoopPtr = &fReadLoop;
       fProcessingThreads.emplace_back(&StraxFormatter::Process, fFormatters.back().get());
     } catch(const std::exception& e) {
       fLog->Entry(MongoLog::Warning, "Error opening processing threads: %s",

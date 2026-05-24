@@ -8,8 +8,11 @@
 #include <vector>
 #include <cstdint>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <list>
 #include <mongocxx/collection.hpp>
+#include "DataTypes.hh"
 
 class StraxFormatter;
 class MongoLog;
@@ -58,6 +61,7 @@ private:
   // For reporting to frontend
   volatile std::atomic_long fDataRate;
   std::atomic_int fPLL;
+
 };
 
 #endif

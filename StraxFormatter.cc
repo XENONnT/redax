@@ -110,18 +110,18 @@ StraxFormatter::StraxFormatter(std::shared_ptr<Options>& opts, std::shared_ptr<M
 }
 
 StraxFormatter::~StraxFormatter(){
-  if (fMutexWaitTime.size() > 0) {
+  /*if (fMutexWaitTime.size() > 0) {
     fLog->Entry(MongoLog::Local, "Thread %lx mutex report: min %i max %i mean %i median %i num %i",
         fThreadId, fMutexWaitTime.front(), fMutexWaitTime.back(),
         std::accumulate(fMutexWaitTime.begin(), fMutexWaitTime.end(), 0l)/fMutexWaitTime.size(),
         fMutexWaitTime[fMutexWaitTime.size()/2], fMutexWaitTime.size());
-  }
+  }*/
 }
 
 void StraxFormatter::Close(std::map<int,int>& ret){
   fActive = false;
   for (auto& iter : fFailCounter) ret[iter.first] += iter.second;
-  fCV.notify_one();
+  fQueueCV.notify_one();
 }
 
 void StraxFormatter::GetDataPerChan(std::map<int, int>& ret) {
@@ -419,6 +419,7 @@ void StraxFormatter::AddFragmentToBuffer(std::string fragment, uint32_t ts, int 
   }
 }
 
+/*
 int StraxFormatter::ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>& in, int bytes) {
   using namespace std::chrono;
   auto start = high_resolution_clock::now();
@@ -434,6 +435,7 @@ int StraxFormatter::ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>& 
   }
   return 1;
 }
+*/
 
 void StraxFormatter::Process() {
   // this func runs in its own thread
@@ -441,17 +443,24 @@ void StraxFormatter::Process() {
   std::stringstream ss;
   ss<<fHostname<<'_'<<fThreadId;
   fFullHostname = ss.str();
-  fActive = true;
-  std::unique_ptr<data_packet> dp;
-  while (fActive == true || fBuffer.size() > 0) {
-    std::unique_lock<std::mutex> lk(fBufferMutex);
-    fCV.wait(lk, [&]{return fBuffer.size() > 0 || fActive == false;});
-    if (fBuffer.size() > 0) {
-      dp = std::move(fBuffer.front());
-      fBuffer.pop_front();
+  DataBatch batch; //Place to store the data we pop from the queue
+  while (*fReadLoopPtr == true || !fQueue.empty()) {
+    std::unique_lock<std::mutex> lk(fQueueMutex);
+    fQueueCV.wait(lk, [this]{return fQueue.size() > 0 || !(*fReadLoopPtr);});
+    if (!fQueue.empty()) {
+      auto start = high_resolution_clock::now();
+      batch = std::move(fQueue.front());
+      fQueue.pop_front();
+      fQueueCV.notify_one();
+      //NOT SURE IF WE NEED THIS! fInputBufferSize -=batch.bytes;
       lk.unlock();
-      ProcessDatapacket(std::move(dp));
-      if (fActive == true) WriteOutChunks();
+      auto end = high_resolution_clock::now();
+      fMutexWaitTime.push_back(duration_cast<nanoseconds>(end-start).count());
+      //Loop over the data in the batch
+      for (auto& dp:batch.packets){
+          ProcessDatapacket(std::move(dp));
+          if (*fReadLoopPtr == true) WriteOutChunks();
+      }
     } else {
       lk.unlock();
     }

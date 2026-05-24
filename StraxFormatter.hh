@@ -6,6 +6,7 @@
 #include <string>
 #include <map>
 #include <mutex>
+#include <deque>
 #include <experimental/filesystem>
 #include <numeric>
 #include <atomic>
@@ -17,11 +18,13 @@
 #include <string_view>
 #include <chrono>
 #include <functional>
+#include "DataTypes.hh"
 
 class Options;
 class MongoLog;
 class V1724;
 
+/*
 struct data_packet{
   data_packet() : clock_counter(0), header_time(0) {}
   data_packet(std::u32string s, uint32_t ht, long cc) :
@@ -45,6 +48,7 @@ struct data_packet{
   uint32_t header_time;
   std::shared_ptr<V1724> digi;
 };
+*/
 
 class StraxFormatter{
   /*
@@ -60,7 +64,12 @@ public:
   void Process();
   std::pair<int, int> GetBufferSize() {return {fInputBufferSize.load(), fOutputBufferSize.load()};}
   void GetDataPerChan(std::map<int, int>& ret);
-  int ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>&, int);
+  //int ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>&, int);
+  std::mutex fQueueMutex;
+  std::condition_variable fQueueCV;
+  std::deque<DataBatch> fQueue;
+  std::atomic_bool* fReadLoopPtr; // Pointer to DAQController's fReadLoop
+  std::atomic_int fInputBufferSize, fOutputBufferSize;
 
 private:
   void ProcessDatapacket(std::unique_ptr<data_packet> dp);
@@ -105,14 +114,14 @@ private:
   std::map<int, long> fFragsPerEvent;
   std::map<int, long> fEvPerDP;
   std::map<int, long> fBytesPerChunk;
-  std::atomic_int fInputBufferSize, fOutputBufferSize;
+  //std::atomic_int fInputBufferSize, fOutputBufferSize;
   long fBytesProcessed;
 
   double fProcTimeDP, fProcTimeEv, fProcTimeCh, fCompTime;
   std::thread::id fThreadId;
-  std::condition_variable fCV;
-  std::mutex fBufferMutex;
-  std::list<std::unique_ptr<data_packet>> fBuffer;
+  //std::condition_variable fCV;
+  //std::mutex fBufferMutex;
+  //std::list<std::unique_ptr<data_packet>> fBuffer;
   std::vector<int> fMutexWaitTime;
 };
 
