@@ -250,12 +250,12 @@ void DAQController::ReadData(int link){
       //First lock the queue - if it is in use by a formatter or other write process it will wait - should be quite short
 	{
       		std::unique_lock<std::mutex> lock(fFormatters[target_formatter]->fQueueMutex); 
-		while (fFormatters[target_formatter]->fQueue.size() >= 1000 && fReadLoop) {
+		//while (fFormatters[target_formatter]->fQueue.size() >= 1000 && fReadLoop) {
         	// wait() automatically unlocks the mutex and puts this thread to sleep.
         	// When it wakes up, it re-locks the mutex and checks the 'while' condition again.
         		//fFormatters[target_formatter]->fQueueCV.wait(lock); 
-			fLog->Entry(MongoLog::Warning, "The queue is building up for one thread")
-    		}
+		//	fLog->Entry(MongoLog::Warning, "The queue is building up for one thread");
+    		//}
                 if(fReadLoop){
                       fFormatters[target_formatter]->fQueue.push_back({std::move(local_buffer),bytes_this_loop});
 		      fFormatters[target_formatter]->fInputBufferSize += bytes_this_loop;
