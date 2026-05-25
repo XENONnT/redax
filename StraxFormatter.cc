@@ -190,9 +190,35 @@ void StraxFormatter::GenerateArtificialDeadtime(int64_t start_time_ns, int32_t s
 }
 
 void StraxFormatter::ProcessDatapacket(std::unique_ptr<data_packet> dp){
-  // Take a buffer and break it up into one document per channel
+
+
   const char32_t* const buff_data = dp->buff.data();
   const size_t buff_words = dp->buff.size();
+  /*
+  // --- DEBUG CHECKPOINT START ---
+  if (dp == nullptr) {
+      fLog->Entry(MongoLog::Error, "CRITICAL: ProcessDatapacket received a NULL packet!");
+      return;
+  }
+
+  //const size_t buff_words = dp->buff.size();
+  
+  // Log the state of the thread and the data
+  fLog->Entry(MongoLog::Local, "DEBUG: fActive=%d, buff_words=%lu, pointer=%p", 
+              fActive.load(), buff_words, (void*)dp.get());
+  
+  if (fActive == false) {
+      fLog->Entry(MongoLog::Error, "Symptom Found: fActive is FALSE. The loop will skip all data!");
+  }
+  if (buff_words == 0) {
+      fLog->Entry(MongoLog::Error, "Symptom Found: buff_words is 0. The packet is empty!");
+  }
+  // --- DEBUG CHECKPOINT END ---
+  */
+
+// Take a buffer and break it up into one document per channel
+  //const char32_t* const buff_data = dp->buff.data();
+  //const size_t buff_words = dp->buff.size();
   size_t idx = 0;
   int evs_this_dp = 0;
   bool in_gap = false;
@@ -289,6 +315,7 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
   for(unsigned ch=0; ch<n_chan; ch++){
     if (channel_mask & (1<<ch)) {
       if (buff.size() < size_t(channel_header_words)) {
+        //fLog->Entry(MongoLog::Local, "ProcessChannel called for channel %d", ch);
         const uint16_t faulty_mask = static_cast<uint16_t>(channel_mask) & ~static_cast<uint16_t>((1u << ch) - 1u);
         fLog->Entry(MongoLog::Error,
             "Unrecoverable: missing channel header from %i (ch %i, have %i words, need %i) event_mask 0x%04x (DAQ error disabled)",
@@ -335,10 +362,9 @@ int StraxFormatter::ProcessEvent(std::u32string_view buff,
 }
 
 int StraxFormatter::ProcessChannel(std::u32string_view buff, int words_in_event,
-    int channel_mask, uint32_t event_time, int& frags, int channel,
+int channel_mask, uint32_t event_time, int& frags, int channel,
     const std::unique_ptr<data_packet>& dp, std::map<int, int>& dpc) {
   // buff points to the first word of the channel's data
-
   int n_channels = std::bitset<max_channels>(channel_mask).count();
   // returns {timestamp (ns), words this channel, baseline, waveform}
   auto [timestamp, channel_words, baseline_ch, wf] = dp->digi->UnpackChannelHeader(
@@ -439,14 +465,27 @@ int StraxFormatter::ReceiveDatapackets(std::list<std::unique_ptr<data_packet>>& 
 
 void StraxFormatter::Process() {
   // this func runs in its own thread
+  fLog->Entry(MongoLog::Local, "Process thread STARTED for this formatter");
   fThreadId = std::this_thread::get_id();
   std::stringstream ss;
   ss<<fHostname<<'_'<<fThreadId;
   fFullHostname = ss.str();
   DataBatch batch; //Place to store the data we pop from the queue
-  while (*fReadLoopPtr == true || !fQueue.empty()) {
+  while (true) {
     std::unique_lock<std::mutex> lk(fQueueMutex);
+    //fLog->Entry(MongoLog::Local, "WAITING ON CV AT ADDRESS: %p", (void*)&fQueueCV);
+    //fLog->Entry(MongoLog::Local, "CONSUMER: Waiting on Queue at %p", (void*)&fQueue);
+    //fLog->Entry(MongoLog::Local, "Surgical Check: QueueSize=%lu, LoopPtr=%p, LoopVal=%d", 
+    //            fQueue.size(), (void*)fReadLoopPtr, fReadLoopPtr ? (int)(*fReadLoopPtr) : -1);
     fQueueCV.wait(lk, [this]{return fQueue.size() > 0 || !(*fReadLoopPtr);});
+    //fLog->Entry(MongoLog::Local, "M1: Woke up");
+    if (!(*fReadLoopPtr) && fQueue.empty()) {
+        break; 
+    }
+    //fLog->Entry(MongoLog::Local, "M2: Woke up");
+    //if (fQueue.size() > 0 && fQueue.size() % 100 == 0) {
+    //    fLog->Entry(MongoLog::Local, "Thread %p - Queue Depth: %lu | Buffer Size: %d", 
+    //                (void*)this, fQueue.size(), fInputBufferSize.load());}
     if (!fQueue.empty()) {
       auto start = high_resolution_clock::now();
       batch = std::move(fQueue.front());
@@ -454,12 +493,17 @@ void StraxFormatter::Process() {
       fQueueCV.notify_one();
       //NOT SURE IF WE NEED THIS! fInputBufferSize -=batch.bytes;
       lk.unlock();
+      //fLog->Entry(MongoLog::Local, "M3: Lock released. Processing batch of %lu", batch.packets.size());
       auto end = high_resolution_clock::now();
       fMutexWaitTime.push_back(duration_cast<nanoseconds>(end-start).count());
       //Loop over the data in the batch
       for (auto& dp:batch.packets){
           ProcessDatapacket(std::move(dp));
-          if (*fReadLoopPtr == true) WriteOutChunks();
+          if (*fReadLoopPtr == true){
+		//fLog->Entry(MongoLog::Local, "M4: Started to write");
+		WriteOutChunks();
+		//fLog->Entry(MongoLog::Local, "M4: Finised the write");
+	  }
       }
     } else {
       lk.unlock();

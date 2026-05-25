@@ -200,7 +200,7 @@ void DAQController::ReadData(int link){
   std::vector<int> mutex_wait_times;
   mutex_wait_times.reserve(1<<20);
   int words = 0;
-  unsigned transfer_batch = fOptions->GetInt("transfer_batch", 8);
+  unsigned transfer_batch = fOptions->GetInt("transfer_batch", 32);
   int bytes_this_loop(0);
   fRunning[link] = true;
   std::chrono::microseconds sleep_time(fOptions->GetInt("us_between_reads", 0));
@@ -247,21 +247,27 @@ void DAQController::ReadData(int link){
       //while (fFormatters[(++c)%num_threads]->ReceiveDatapackets(local_buffer, bytes_this_loop)) {}
       //First work out which formatter thread to use:
       int target_formatter = (++c) % num_threads;
+      auto& formatter = fFormatters[target_formatter];
       //First lock the queue - if it is in use by a formatter or other write process it will wait - should be quite short
 	{
-      		std::unique_lock<std::mutex> lock(fFormatters[target_formatter]->fQueueMutex); 
+      		std::lock_guard<std::mutex> lock(formatter->fQueueMutex); 
 		//while (fFormatters[target_formatter]->fQueue.size() >= 1000 && fReadLoop) {
         	// wait() automatically unlocks the mutex and puts this thread to sleep.
         	// When it wakes up, it re-locks the mutex and checks the 'while' condition again.
         		//fFormatters[target_formatter]->fQueueCV.wait(lock); 
 		//	fLog->Entry(MongoLog::Warning, "The queue is building up for one thread");
     		//}
-                if(fReadLoop){
-                      fFormatters[target_formatter]->fQueue.push_back({std::move(local_buffer),bytes_this_loop});
-		      fFormatters[target_formatter]->fInputBufferSize += bytes_this_loop;
-                }
+                
+                      //fLog->Entry(MongoLog::Local, "PRODUCER: Pushing to Queue at %p", (void*)&fFormatters[target_formatter]->fQueue);
+                      formatter->fQueue.push_back({std::move(local_buffer),bytes_this_loop});
+		      formatter->fInputBufferSize += bytes_this_loop;
+		      //fLog->Entry(MongoLog::Local, "PRODUCER: Pushed to formatter %d, queue size is now %lu", 
+                //target_formatter, fFormatters[target_formatter]->fQueue.size());
+                
 	}//here the lock is released as it leaves the scope
-      fFormatters[target_formatter]->fQueueCV.notify_one();
+      formatter->fQueueCV.notify_all();
+      //fLog->Entry(MongoLog::Local, "PRODUCER: Notified formatter %d", target_formatter);
+      //fLog->Entry(MongoLog::Local, "NOTIFYING CV AT ADDRESS: %p", (void*)&fFormatters[target_formatter]->fQueueCV);
       auto t_end = std::chrono::high_resolution_clock::now();
       mutex_wait_times.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
             t_end-t_start).count());
@@ -287,6 +293,8 @@ void DAQController::ReadData(int link){
 }
 
 int DAQController::OpenThreads(){
+
+  fReadLoop = true;
   const std::lock_guard<std::mutex> lg(fMutex);
   fProcessingThreads.reserve(fNProcessingThreads);
   for(int i=0; i<fNProcessingThreads; i++){
@@ -305,7 +313,7 @@ int DAQController::OpenThreads(){
     fReadoutThreads.emplace_back(&DAQController::ReadData, this, p.first);
   return 0;
 }
-
+/*
 void DAQController::CloseThreads(){
   const std::lock_guard<std::mutex> lg(fMutex);
   fLog->Entry(MongoLog::Local, "Ending RO threads");
@@ -331,6 +339,40 @@ void DAQController::CloseThreads(){
     fLog->Entry(MongoLog::Warning, msg.str());
   }
 }
+*/
+void DAQController::CloseThreads(){
+  const std::lock_guard<std::mutex> lg(fMutex);
+
+  //the fReadLoop is now false but we need to tell all the formatting threads this!
+  for (auto& sf : fFormatters) {
+      sf->fQueueCV.notify_all();
+  }
+
+  fLog->Entry(MongoLog::Local, "Ending RO threads");
+  for (auto& t : fReadoutThreads) if (t.joinable()) t.join();
+  
+  fLog->Entry(MongoLog::Local, "Joining processing threads");
+  for (auto& t : fProcessingThreads) if (t.joinable()) t.join();  
+  fProcessingThreads.clear();
+
+  std::map<int,int> board_fails;
+  for (auto& sf : fFormatters) {
+    sf->Close(board_fails);
+  }
+  
+  fLog->Entry(MongoLog::Local, "Destroying formatters");
+  for (auto& sf : fFormatters) sf.reset();
+  fFormatters.clear();
+
+  if (std::accumulate(board_fails.begin(), board_fails.end(), 0,
+        [=](int tot, auto& iter) {return std::move(tot) + iter.second;})) {
+    std::stringstream msg;
+    msg << "Found board failures: ";
+    for (auto& iter : board_fails) msg << iter.first << ":" << iter.second << " | ";
+    fLog->Entry(MongoLog::Warning, msg.str());
+  }
+}
+
 
 void DAQController::StatusUpdate(mongocxx::collection* collection) {
   using namespace bsoncxx::builder::stream;
