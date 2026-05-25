@@ -203,7 +203,7 @@ void DAQController::ReadData(int link){
   unsigned transfer_batch = fOptions->GetInt("transfer_batch", 8);
   int bytes_this_loop(0);
   fRunning[link] = true;
-  std::chrono::microseconds sleep_time(fOptions->GetInt("us_between_reads", 10));
+  std::chrono::microseconds sleep_time(fOptions->GetInt("us_between_reads", 0));
   int c = 0;
   const int num_threads = fNProcessingThreads;
   while(fReadLoop){
