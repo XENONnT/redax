@@ -18,6 +18,7 @@
 #include <string_view>
 #include <chrono>
 #include <functional>
+#include <unordered_map>
 #include "DataTypes.hh"
 
 class Options;
@@ -83,7 +84,7 @@ private:
   void GenerateArtificialDeadtime(int64_t start_time_ns, int32_t samples_in_pulse,
       const std::shared_ptr<V1724>& digi, uint32_t event_time_tag, uint16_t event_channel_mask,
       uint16_t faulty_channel_mask);
-  void AddFragmentToBuffer(std::string, uint32_t, int);
+  void AddFragmentToBuffer(std::string, int, uint32_t, int);
   std::vector<std::string> GetChunkNames(int);
 
   std::experimental::filesystem::path GetFilePath(const std::string&, bool=false);
@@ -100,6 +101,7 @@ private:
   int fFullFragmentSize;
   int fBufferNumChunks;
   int fWarnIfChunkOlderThan;
+  int fWatermarkIdleMs;
   unsigned fChunkNameLength;
   int64_t fFullChunkLength;
   std::string fOutputPath, fHostname, fFullHostname;
@@ -116,6 +118,8 @@ private:
   std::map<int, long> fBytesPerChunk;
   //std::atomic_int fInputBufferSize, fOutputBufferSize;
   long fBytesProcessed;
+  std::unordered_map<int, int> fMaxChunkSeenByBid;
+  std::unordered_map<int, std::chrono::steady_clock::time_point> fLastSeenByBid;
 
   double fProcTimeDP, fProcTimeEv, fProcTimeCh, fCompTime;
   std::thread::id fThreadId;

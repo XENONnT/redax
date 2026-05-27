@@ -195,7 +195,6 @@ void DAQController::ReadData(int link){
   uint32_t board_status = 0;
   int readcycler = 0;
   int err_val = 0;
-  std::list<std::unique_ptr<data_packet>> local_buffer;
   std::unique_ptr<data_packet> dp;
   std::vector<int> mutex_wait_times;
   mutex_wait_times.reserve(1<<20);
@@ -204,8 +203,11 @@ void DAQController::ReadData(int link){
   int bytes_this_loop(0);
   fRunning[link] = true;
   std::chrono::microseconds sleep_time(fOptions->GetInt("us_between_reads", 0));
-  int c = 0;
   const int num_threads = fNProcessingThreads;
+  // Per-formatter queues to keep board->formatter routing stable, reducing out-of-order delivery.
+  std::vector<std::list<std::unique_ptr<data_packet>>> buffers_by_formatter(num_threads);
+  std::vector<int> bytes_by_formatter(num_threads, 0);
+
   while(fReadLoop){
     for(auto& digi : fDigitizers[link]) {
 
@@ -237,37 +239,29 @@ void DAQController::ReadData(int link){
         break;
       } else if(words>0){
         dp->digi = digi;
-        local_buffer.emplace_back(std::move(dp));
-        bytes_this_loop += words*sizeof(char32_t);
+        const uint32_t bid_u = static_cast<uint32_t>(digi->bid());
+        const int target_formatter = int(bid_u % static_cast<uint32_t>(num_threads));
+        buffers_by_formatter[target_formatter].emplace_back(std::move(dp));
+        const int bytes = words * sizeof(char32_t);
+        bytes_by_formatter[target_formatter] += bytes;
+        bytes_this_loop += bytes;
       }
     } // for digi in digitizers
-    if (local_buffer.size() && (readcycler % transfer_batch == 0)) {
+    if (bytes_this_loop && (readcycler % transfer_batch == 0)) {
       fDataRate += bytes_this_loop;
       auto t_start = std::chrono::high_resolution_clock::now();
-      //while (fFormatters[(++c)%num_threads]->ReceiveDatapackets(local_buffer, bytes_this_loop)) {}
-      //First work out which formatter thread to use:
-      int target_formatter = (++c) % num_threads;
-      auto& formatter = fFormatters[target_formatter];
-      //First lock the queue - if it is in use by a formatter or other write process it will wait - should be quite short
-	{
-      		std::lock_guard<std::mutex> lock(formatter->fQueueMutex); 
-		//while (fFormatters[target_formatter]->fQueue.size() >= 1000 && fReadLoop) {
-        	// wait() automatically unlocks the mutex and puts this thread to sleep.
-        	// When it wakes up, it re-locks the mutex and checks the 'while' condition again.
-        		//fFormatters[target_formatter]->fQueueCV.wait(lock); 
-		//	fLog->Entry(MongoLog::Warning, "The queue is building up for one thread");
-    		//}
-                
-                      //fLog->Entry(MongoLog::Local, "PRODUCER: Pushing to Queue at %p", (void*)&fFormatters[target_formatter]->fQueue);
-                      formatter->fQueue.push_back({std::move(local_buffer),bytes_this_loop});
-		      formatter->fInputBufferSize += bytes_this_loop;
-		      //fLog->Entry(MongoLog::Local, "PRODUCER: Pushed to formatter %d, queue size is now %lu", 
-                //target_formatter, fFormatters[target_formatter]->fQueue.size());
-                
-	}//here the lock is released as it leaves the scope
-      formatter->fQueueCV.notify_all();
-      //fLog->Entry(MongoLog::Local, "PRODUCER: Notified formatter %d", target_formatter);
-      //fLog->Entry(MongoLog::Local, "NOTIFYING CV AT ADDRESS: %p", (void*)&fFormatters[target_formatter]->fQueueCV);
+      for (int target_formatter = 0; target_formatter < num_threads; target_formatter++) {
+        if (buffers_by_formatter[target_formatter].empty()) continue;
+        auto& formatter = fFormatters[target_formatter];
+        const int bytes = bytes_by_formatter[target_formatter];
+        {
+          std::lock_guard<std::mutex> lock(formatter->fQueueMutex);
+          formatter->fQueue.push_back({std::move(buffers_by_formatter[target_formatter]), bytes});
+          formatter->fInputBufferSize += bytes;
+        }
+        formatter->fQueueCV.notify_all();
+        bytes_by_formatter[target_formatter] = 0;
+      }
       auto t_end = std::chrono::high_resolution_clock::now();
       mutex_wait_times.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
             t_end-t_start).count());

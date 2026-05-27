@@ -10,6 +10,7 @@
 #include <bitset>
 #include <ctime>
 #include <cmath>
+#include <limits>
 
 namespace fs=std::experimental::filesystem;
 using namespace std::chrono;
@@ -94,6 +95,10 @@ StraxFormatter::StraxFormatter(std::shared_ptr<Options>& opts, std::shared_ptr<M
 
   fBufferNumChunks = fOptions->GetInt("strax_buffer_num_chunks", 2);
   fWarnIfChunkOlderThan = fOptions->GetInt("strax_chunk_phase_limit", 2);
+  // Used to avoid stalling chunk flushing forever if a board goes quiet.
+  // Default: 2 * chunk length (in seconds), clamped to at least 1000 ms.
+  const int default_idle_ms = std::max(1000, int(std::ceil(2. * (double(fChunkLength) / 1e9)) * 1000));
+  fWatermarkIdleMs = fOptions->GetInt("strax_watermark_idle_ms", default_idle_ms);
   fMutexWaitTime.reserve(1<<20);
 
   std::string output_path = fOptions->GetString("strax_output_path", "./");
@@ -185,7 +190,7 @@ void StraxFormatter::GenerateArtificialDeadtime(int64_t start_time_ns, int32_t s
     for (; samples_this_frag < samples_per_frag; samples_this_frag++)
       fragment.append((char*)&baseline, sizeof(baseline));
 
-    AddFragmentToBuffer(std::move(fragment), event_time_tag, 0);
+    AddFragmentToBuffer(std::move(fragment), digi->bid(), event_time_tag, 0);
   }
 }
 
@@ -407,16 +412,31 @@ int channel_mask, uint32_t event_time, int& frags, int channel,
     for (; samples_this_frag < samples_per_frag; samples_this_frag++)
       fragment.append((char*)&zero_filler, sizeof(zero_filler));
 
-    AddFragmentToBuffer(std::move(fragment), event_time, dp->clock_counter);
+    AddFragmentToBuffer(std::move(fragment), dp->digi->bid(), event_time, dp->clock_counter);
   } // loop over frag_i
   dpc[global_ch] += samples_in_pulse*sizeof(uint16_t);
   return channel_words;
 }
 
-void StraxFormatter::AddFragmentToBuffer(std::string fragment, uint32_t ts, int rollovers) {
+void StraxFormatter::AddFragmentToBuffer(std::string fragment, int bid, uint32_t ts, int rollovers) {
   // Get the CHUNK and decide if this event also goes into a PRE/POST file
   int64_t timestamp = *(int64_t*)fragment.data();
   int chunk_id = timestamp/fFullChunkLength;
+  {
+    const auto now = steady_clock::now();
+    auto it = fMaxChunkSeenByBid.find(bid);
+    if (it == fMaxChunkSeenByBid.end()) fMaxChunkSeenByBid.emplace(bid, chunk_id);
+    else it->second = std::max(it->second, chunk_id);
+    fLastSeenByBid[bid] = now;
+  }
+
+  if (chunk_id < fEmptyVerified) {
+    // This indicates out-of-order delivery into this formatter: we already emitted placeholders
+    // (and likely finalized) this chunk. Don't crash; log loudly since this will corrupt output.
+    fLog->Entry(MongoLog::Error,
+        "Late fragment for already-finalized chunk %i (< empty_verified %i) from board %i (thread %lx) (ts %lx ro %i)",
+        chunk_id, fEmptyVerified, bid, fThreadId, timestamp, rollovers);
+  }
   bool overlap = (chunk_id+1)* fFullChunkLength - timestamp <= fChunkOverlap;
   int min_chunk(0), max_chunk(1);
   if (fChunks.size() > 0) {
@@ -575,21 +595,31 @@ void StraxFormatter::WriteOutChunk(int chunk_i){
 }
 
 void StraxFormatter::WriteOutChunks() {
-  int min_chunk(999999), max_chunk(0), tot_frags(0), n_frags(0);
-  double average_chunk(0);
-  for (auto it = fChunks.begin(); it != fChunks.end(); it++) {
-    min_chunk = std::min(min_chunk, it->first);
-    max_chunk = std::max(max_chunk, it->first);
-    n_frags = it->second.size() + fOverlaps[it->first].size();
-    tot_frags += n_frags;
-    average_chunk += it->first * n_frags;
+  if (fChunks.empty()) return;
+
+  // Conservative flushing: only finalize chunks that are safely behind the slowest (non-idle) board.
+  // This prevents out-of-order fragments from overwriting already-finalized chunk files.
+  const auto now = steady_clock::now();
+  int watermark = std::numeric_limits<int>::max();
+  bool have_active = false;
+  for (const auto& [bid, max_chunk] : fMaxChunkSeenByBid) {
+    const auto it_last = fLastSeenByBid.find(bid);
+    if (it_last == fLastSeenByBid.end()) continue;
+    const auto idle_ms = duration_cast<milliseconds>(now - it_last->second).count();
+    if (idle_ms > fWatermarkIdleMs) continue;  // treat as inactive
+    watermark = std::min(watermark, max_chunk);
+    have_active = true;
   }
-  if (tot_frags == 0) return;
-  average_chunk /= tot_frags;
-  for (; min_chunk < average_chunk - fBufferNumChunks; min_chunk++)
-    WriteOutChunk(min_chunk);
-  CreateEmpty(min_chunk);
-  return;
+  if (!have_active) return;
+
+  const int flush_before = watermark - fBufferNumChunks; // keep margin of buffered chunks
+  while (!fChunks.empty()) {
+    auto it = fChunks.begin();
+    const int chunk_id = it->first;
+    if (chunk_id >= flush_before) break;
+    WriteOutChunk(chunk_id);
+  }
+  if (flush_before > fEmptyVerified) CreateEmpty(flush_before);
 }
 
 void StraxFormatter::End() {
