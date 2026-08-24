@@ -148,7 +148,7 @@ class Hypervisor(object):
             if cycle_boards and not self.testing:
                 self.logger.info(f'Cycling boards on {h}')
                 reset = r"cd ~/read_reg && for l in {0..4}; do for b in {0..7}; do ./reset $l $b; done; done; "
-            cmd = f'"source /daq_common/etc/daqrc ; {reset} cd /daq_common3/daqnt/readers && ./start_process.sh --process {process} --id {id_}{test}"'
+            cmd = f'"source /daq_common3/bashrc ; {reset} cd /daq_common3/daqnt/readers && ./start_process.sh --process {process} --id {id_}{test}"'
             ret_temp = []
             self.run_over_ssh(f'xedaq@{physical_host}', cmd, ret_temp)
             ret.append(ret_temp[0]['retcode'])

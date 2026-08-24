@@ -4,10 +4,6 @@ CXX	= g++
 BUILD_COMMIT = "$(shell git log -n 1 --pretty=oneline | awk '{print $$1}')"
 CFLAGS	+= -Wall -Wextra -pedantic -pedantic-errors -g -O2 -DLINUX -DREDAX_BUILD_COMMIT='$(BUILD_COMMIT)' -std=c++17 -pthread $(shell pkg-config --cflags libmongocxx)
 CPPFLAGS := $(CFLAGS)
-IS_READER0 := false
-ifeq "$(shell hostname)" "reader0"
-	IS_READER0 = true
-endif
 LDFLAGS += -lCAENVME -lstdc++fs -llz4 -lblosc $(shell pkg-config --libs libmongocxx) $(shell pkg-config --libs mongoc2) $(shell pkg-config --libs libbsoncxx)
 #LDFLAGS_CC = ${LDFLAGS} -lexpect -ltcl8.6
 
@@ -18,7 +14,7 @@ OBJECTS_SLAVE = $(SOURCES_SLAVE:%.cc=%.o)
 DEPS_SLAVE = $(OBJECTS_SLAVE:%.o=%.d)
 EXEC_SLAVE = redax
 
-ifeq "$(IS_READER0)" "true"
+ifeq "$(BUILD_DDC10)" "true"
 	SOURCES_SLAVE += DDC10.cc
 	CFLAGS += -DHASDDC10
 	LDFLAGS += -lexpect -ltcl8.6
