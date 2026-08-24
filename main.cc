@@ -195,8 +195,8 @@ int main(int argc, char** argv){
 	std::string command = "";
 	std::string user = "";
 	try{
-	  command = (doc)["command"].get_utf8().value.to_string();
-	  user = (doc)["user"].get_utf8().value.to_string();
+	  command = (doc)["command"].get_string().value;
+	  user = (doc)["user"].get_string().value;
 	}
 	catch (const std::exception &e){
 	  fLog->Entry(MongoLog::Warning, "Received malformed command %s",
@@ -241,7 +241,7 @@ int main(int argc, char** argv){
 	    catch(const std::exception &e){
 	    }
 	    // Mongocxx types confusing so passing json strings around
-            std::string mode = doc["mode"].get_utf8().value.to_string();
+            std::string mode(doc["mode"].get_string().value);
             fLog->Entry(MongoLog::Local, "Getting options doc for mode %s", mode.c_str());
 	    fOptions = std::make_shared<Options>(fLog, mode, hostname, &opts_collection,
 			      pool, dbname, override_json);

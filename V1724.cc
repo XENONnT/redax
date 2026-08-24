@@ -65,7 +65,8 @@ V1724::~V1724(){
 }
 
 int V1724::Init(int link, int crate) {
-  int a = CAENVME_Init(cvV2718, link, crate, &fBoardHandle);
+  uint32_t arg = link;
+  int a = CAENVME_Init2(cvV2718, &arg, crate, &fBoardHandle);
   if(a != cvSuccess){
     fLog->Entry(MongoLog::Warning, "Board %i failed to init, error %i handle %i link %i bdnum %i",
             fBID, a, fBoardHandle, link, crate);

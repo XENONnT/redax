@@ -64,7 +64,7 @@ int Options::Load(std::string name, mongocxx::collection* opts_collection, std::
     bson_value = new bsoncxx::document::value(doc);
     bson_options = bson_value->view();
     try{
-      fDetector = bson_options["detectors"][fHostname].get_utf8().value.to_string();
+      fDetector = bson_options["detectors"][fHostname].get_string().value;
     }catch(const std::exception& e){
       fLog->Entry(MongoLog::Warning, "No detector specified for this host");
       return -1;
@@ -147,7 +147,7 @@ int Options::GetNestedInt(std::string path, int default_value){
 
 std::string Options::GetString(std::string path, std::string default_value){
   try{
-    return bson_options[path].get_utf8().value.to_string();
+    return std::string(bson_options[path].get_string().value);
   }
   catch (const std::exception &e){
     //LOG
@@ -169,7 +169,7 @@ std::string Options::GetNestedString(std::string path, std::string default_value
     auto val = bson_options[fields[0]];
     for(unsigned int i=1; i<fields.size(); i++)
       val = val[fields[i]];
-    return val.get_utf8().value.to_string();
+    return std::string(val.get_string().value);
   }catch(const std::exception &e){
     fLog->Entry(MongoLog::Local, "Using default value for %s",path.c_str());
     return default_value;
@@ -192,11 +192,11 @@ std::vector<BoardType> Options::GetBoards(std::string type){
     types.push_back(type);
 
   for(bsoncxx::array::element ele : subarr){
-    std::string btype = ele["type"].get_utf8().value.to_string();
+    std::string btype(ele["type"].get_string().value);
     if(!std::count(types.begin(), types.end(), btype))
       continue;
     try{
-      if(ele["host"].get_utf8().value.to_string() != fHostname)
+      if(ele["host"].get_string().value != fHostname)
         continue;
     }
     catch(const std::exception &e){
@@ -208,8 +208,8 @@ std::vector<BoardType> Options::GetBoards(std::string type){
     bt.link = ele["link"].get_int32();
     bt.crate = ele["crate"].get_int32();
     bt.board = ele["board"].get_int32();
-    bt.type = ele["type"].get_utf8().value.to_string();
-    bt.vme_address = DAXHelpers::StringToHex(ele["vme_address"].get_utf8().value.to_string());
+    bt.type = ele["type"].get_string().value;
+    bt.vme_address = DAXHelpers::StringToHex(std::string(ele["vme_address"].get_string().value));
     ret.push_back(bt);
   }
 
@@ -227,7 +227,7 @@ std::vector<RegisterType> Options::GetRegisters(int board, bool strict){
       sdet = "";
     }catch(const std::exception& e){
       try{
-        sdet = ele["board"].get_utf8().value.to_string();
+        sdet = ele["board"].get_string().value;
         ibid = -1;
       }catch(const std::exception& ee){
         throw std::runtime_error("Invalid register: board is neither int nor string");
@@ -236,8 +236,8 @@ std::vector<RegisterType> Options::GetRegisters(int board, bool strict){
     if ((ibid != board) && strict) continue;
     if ((ibid == board) || (sdet == fDetector) || (sdet == "all")) {
       RegisterType rt;
-      rt.reg = ele["reg"].get_utf8().value.to_string();
-      rt.val = ele["val"].get_utf8().value.to_string();
+      rt.reg = ele["reg"].get_string().value;
+      rt.val = ele["val"].get_string().value;
 
       ret.push_back(rt);
     }
@@ -332,8 +332,8 @@ int Options::GetHEVOpt(HEVOptions &ret){
     ret.component_status = bson_options["DDC10"]["component_status"].get_int32().value;
     ret.width_cut = bson_options["DDC10"]["width_cut"].get_int32().value;
     ret.delay = bson_options["DDC10"]["delay"].get_int32().value;
-    ret.address = bson_options["DDC10"]["address"].get_utf8().value.to_string();
-    ret.required = bson_options["DDC10"]["required"].get_utf8().value.to_string();
+    ret.address = bson_options["DDC10"]["address"].get_string().value;
+    ret.required = bson_options["DDC10"]["required"].get_string().value;
   }catch(std::exception &E){
     fLog->Entry(MongoLog::Local, "Exception getting DDC10 opts: %s",E.what());
     return -1;
